@@ -10,6 +10,8 @@
 
 #define IDD_DLG_ACCEPTANCE              197
 #define IDD_DLG_CHANGE_REGISTERS        228
+#define IDD_ZLG_MODEL                   229
+#define IDC_ZLG_MODEL_LIST              33109
 #define IDD_ZLG_ADVANCE                 230
 #define IDC_ZLG_NOM                     33110
 #define IDC_ZLG_DATA                    33111

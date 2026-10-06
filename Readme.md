@@ -56,7 +56,13 @@ Order:
 
 2. DBManager\DBManager.sln
 
-    我并没有找到这个项目，所以跳过。
+    **从官方 3.0.0 起 DBManager 已闭源**，因此 3.x / 本仓库的 `Sources` 下没有该解决方案，构建 BUSMASTER.sln 时可跳过。
+
+    最后一份开源实现仍在 **BUSMASTER 2.6.4**：
+
+    `D:\Soft\busmaster-master\busmaster-2.6.4\Sources\DBManager\DBManager.sln`
+
+    那是 LIN 数据库（LDF cluster）DLL，给 2.6.x 的 LDFEditor / LDFViewer 用。不要把 3.0 发行包里的闭源 `DBManager.dll` 当成可编译工程。
 
 3. BUSMASTER\BUSMASTER.sln
 

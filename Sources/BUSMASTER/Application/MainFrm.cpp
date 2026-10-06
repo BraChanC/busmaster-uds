@@ -3694,13 +3694,7 @@ void CMainFrame::OnClose()
 	}
     vREP_HandleConnectionStatusChange( FALSE ); //Close reply
 
-    CloseTrace("dll unload");
-    OnDllUnload(); //Unload all the loaded dlls
-
-    //Unload J1939 Node sim dll
-    OnDllUnloadJ1939();
-
-    OnDllUnloadLIN();
+    CloseTrace("dll unload skipped NodeSimEx");
 
     if(m_unTimerSB != 0)
     {

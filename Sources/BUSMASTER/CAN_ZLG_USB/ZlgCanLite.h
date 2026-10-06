@@ -6,6 +6,8 @@
 #define ZCAN_USBCAN2              4
 #define ZCAN_USBCAN_E_U           20
 #define ZCAN_USBCAN_2E_U          21
+#define ZCAN_USBCAN_4E_U          31
+#define ZCAN_USBCAN_8E_U          34
 #define ZCAN_USBCANFD_200U        41
 #define ZCAN_USBCANFD_100U        42
 #define ZCAN_USBCANFD_MINI        43
@@ -22,6 +24,8 @@
 #define CAN_ERR_FLAG  0x20000000U
 #define CAN_ID_FLAG   0x1FFFFFFFU
 #define CANFD_BRS     0x01
+#define CANFD_ESI     0x02
+#define CANFD_TX_ECHO 0x20
 
 typedef void* DEVICE_HANDLE;
 typedef void* CHANNEL_HANDLE;

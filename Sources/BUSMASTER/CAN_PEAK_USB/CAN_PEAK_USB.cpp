@@ -79,6 +79,54 @@ static volatile BOOL sg_bRxRun = FALSE;
 static TPCANBaudrate sg_Baud = PCAN_BAUD_500K;
 static BOOL sg_abCanFd[MAX_PEAK_CHANNELS] = {0};
 static unsigned int sg_aunDataBitRate[MAX_PEAK_CHANNELS] = {0};
+static STCAN_MSG sg_asLastTx[MAX_PEAK_CHANNELS];
+static BOOL sg_abLastTxValid[MAX_PEAK_CHANNELS] = {0};
+static LARGE_INTEGER sg_alnLastTxQpc[MAX_PEAK_CHANNELS] = {0};
+
+static void RememberTx(int nChannelIndex, const STCAN_MSG& sMsg)
+{
+    if (nChannelIndex < 0 || nChannelIndex >= MAX_PEAK_CHANNELS)
+    {
+        return;
+    }
+    sg_asLastTx[nChannelIndex] = sMsg;
+    sg_abLastTxValid[nChannelIndex] = TRUE;
+    QueryPerformanceCounter(&sg_alnLastTxQpc[nChannelIndex]);
+}
+
+static BOOL IsTxEchoFrame(int nChannelIndex, UINT unId, const BYTE* pucData, BYTE ucLen, BYTE ucMsgType)
+{
+    if ((ucMsgType & PCAN_MESSAGE_ECHO) != 0)
+    {
+        if (nChannelIndex >= 0 && nChannelIndex < MAX_PEAK_CHANNELS)
+        {
+            sg_abLastTxValid[nChannelIndex] = FALSE;
+        }
+        return TRUE;
+    }
+    if (nChannelIndex < 0 || nChannelIndex >= MAX_PEAK_CHANNELS || !sg_abLastTxValid[nChannelIndex])
+    {
+        return FALSE;
+    }
+    const STCAN_MSG& tx = sg_asLastTx[nChannelIndex];
+    if (tx.m_unMsgID != unId || tx.m_ucDataLen != ucLen)
+    {
+        return FALSE;
+    }
+    if (ucLen > 0 && memcmp(tx.m_ucData, pucData, ucLen) != 0)
+    {
+        return FALSE;
+    }
+    LARGE_INTEGER lnNow;
+    QueryPerformanceCounter(&lnNow);
+    LONGLONG llFreq = sg_lnFrequency.QuadPart != 0 ? sg_lnFrequency.QuadPart : 1;
+    if ((lnNow.QuadPart - sg_alnLastTxQpc[nChannelIndex].QuadPart) > (llFreq / 20))
+    {
+        return FALSE;
+    }
+    sg_abLastTxValid[nChannelIndex] = FALSE;
+    return TRUE;
+}
 
 static HMODULE sg_hPcan = nullptr;
 static PFN_CAN_Initialize sg_CAN_Initialize = nullptr;
@@ -421,13 +469,17 @@ static void DispatchPcanMessageFD(int nChannelIndex, const TPCANMsgFD& msg, TPCA
     {
         return;
     }
+    BYTE ucLen = LenFromDlc(msg.DLC);
+    if (IsTxEchoFrame(nChannelIndex, msg.ID, msg.DATA, ucLen, msg.MSGTYPE))
+    {
+        return;
+    }
     STCANDATA can_data;
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = RX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_unMsgID = msg.ID;
     can_data.m_uDataInfo.m_sCANMsg.m_ucEXTENDED = (msg.MSGTYPE & PCAN_MESSAGE_EXTENDED) ? 1 : 0;
     can_data.m_uDataInfo.m_sCANMsg.m_ucRTR = (msg.MSGTYPE & PCAN_MESSAGE_RTR) ? 1 : 0;
-    BYTE ucLen = LenFromDlc(msg.DLC);
     can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLen;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nChannelIndex + 1);
     can_data.m_uDataInfo.m_sCANMsg.m_bCANFD = (msg.MSGTYPE & PCAN_MESSAGE_FD) ? true : false;
@@ -442,13 +494,18 @@ static void DispatchPcanMessage(int nChannelIndex, const TPCANMsg& msg, const TP
     {
         return;
     }
+    BYTE ucLen = msg.LEN > 8 ? 8 : msg.LEN;
+    if (IsTxEchoFrame(nChannelIndex, msg.ID, msg.DATA, ucLen, msg.MSGTYPE))
+    {
+        return;
+    }
     STCANDATA can_data;
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = RX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_unMsgID = msg.ID;
     can_data.m_uDataInfo.m_sCANMsg.m_ucEXTENDED = (msg.MSGTYPE & PCAN_MESSAGE_EXTENDED) ? 1 : 0;
     can_data.m_uDataInfo.m_sCANMsg.m_ucRTR = (msg.MSGTYPE & PCAN_MESSAGE_RTR) ? 1 : 0;
-    can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = msg.LEN > 8 ? 8 : msg.LEN;
+    can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLen;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nChannelIndex + 1);
     can_data.m_uDataInfo.m_sCANMsg.m_bCANFD = false;
     memcpy(can_data.m_uDataInfo.m_sCANMsg.m_ucData, msg.DATA, can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen);
@@ -800,6 +857,11 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_StartHardware(void)
         {
             sg_CAN_SetValue(sg_anHandles[i], PCAN_RECEIVE_EVENT, &sg_ahRxEvent[i], sizeof(sg_ahRxEvent[i]));
         }
+        if (sg_CAN_SetValue != nullptr)
+        {
+            DWORD dwEchoOff = PCAN_PARAMETER_OFF;
+            sg_CAN_SetValue(sg_anHandles[i], PCAN_ALLOW_ECHO_FRAMES, &dwEchoOff, sizeof(dwEchoOff));
+        }
     }
 
     GetLocalTime(&sg_CurrSysTime);
@@ -901,7 +963,9 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTx
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = TX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg = sCanTxMsg;
+    can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nIndex + 1);
     QueryPerformanceCounter(&can_data.m_lTickCount);
+    RememberTx(nIndex, can_data.m_uDataInfo.m_sCANMsg);
     EnterCriticalSection(&sg_DIL_CriticalSection);
     vWriteIntoClientsBuffer(can_data);
     LeaveCriticalSection(&sg_DIL_CriticalSection);

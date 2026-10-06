@@ -1017,27 +1017,31 @@ HRESULT GetCurrentGccVersion(std::string& strPath)
     static std::string m_strGccVersion = "";
     if ( m_strGccVersion == "")
     {
+        char chGcc[MAX_PATH] = {0};
+        if (SearchPath(nullptr, "gcc.exe", nullptr, MAX_PATH, chGcc, nullptr) == 0)
+        {
+            return S_FALSE;
+        }
+
         PROCESS_INFORMATION sProcessInfo;
         STARTUPINFO         sStartInfo;
 
         ZeroMemory(&sProcessInfo, sizeof(sProcessInfo) );
         ZeroMemory(&sStartInfo,sizeof(STARTUPINFO));
         sStartInfo.cb           = sizeof(STARTUPINFO);
-        //to use the specified handles
-        sStartInfo.dwFlags |= STARTF_USESTDHANDLES;
+        sStartInfo.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
         sStartInfo.hStdOutput   = nullptr;
         sStartInfo.hStdInput    = nullptr;
         sStartInfo.hStdError    = nullptr;
-        // Use this if you want to hide the child:
         sStartInfo.wShowWindow  = SW_HIDE;
 
         char chTempFolder[MAX_PATH];
         char chTempPath[MAX_PATH];
         GetTempPath( MAX_PATH, chTempFolder );
-        GetTempFileName(chTempFolder, // directory for tmp files
-                        TEXT("BM"),     // temp file name prefix
-                        0,                // create unique name
-                        chTempPath);  // buffer for name
+        GetTempFileName(chTempFolder,
+                        TEXT("BM"),
+                        0,
+                        chTempPath);
         SECURITY_ATTRIBUTES sa;
         sa.nLength = sizeof(sa);
         sa.lpSecurityDescriptor = NULL;
@@ -1045,17 +1049,30 @@ HRESULT GetCurrentGccVersion(std::string& strPath)
         sStartInfo.hStdOutput = ::CreateFile( chTempPath, GENERIC_WRITE|GENERIC_READ, FILE_SHARE_WRITE|FILE_SHARE_READ, &sa, CREATE_ALWAYS,
                                               FILE_ATTRIBUTE_NORMAL, nullptr );
 
+        char chCmd[MAX_PATH + 32];
+        sprintf_s(chCmd, "\"%s\" -dumpversion", chGcc);
 
-        CreateProcess( nullptr, "gcc -dumpversion",
+        if (!CreateProcess( nullptr, chCmd,
                        nullptr, nullptr,
                        TRUE, CREATE_NO_WINDOW,
                        nullptr, nullptr,
-                       &sStartInfo, &sProcessInfo);
+                       &sStartInfo, &sProcessInfo))
+        {
+            if (sStartInfo.hStdOutput != nullptr && sStartInfo.hStdOutput != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(sStartInfo.hStdOutput);
+            }
+            DeleteFile(chTempPath);
+            return S_FALSE;
+        }
 
-        WaitForSingleObject(sProcessInfo.hProcess, INFINITE);
+        if (WaitForSingleObject(sProcessInfo.hProcess, 3000) == WAIT_TIMEOUT)
+        {
+            TerminateProcess(sProcessInfo.hProcess, 1);
+        }
+        CloseHandle(sProcessInfo.hProcess);
+        CloseHandle(sProcessInfo.hThread);
 
-
-        // Attempt a synchronous read operation.
         CloseHandle(sStartInfo.hStdOutput);
 
         CStdioFile InFile;
@@ -1066,12 +1083,13 @@ HRESULT GetCurrentGccVersion(std::string& strPath)
             InFile.ReadString(omSteVer);
             strPath = omSteVer;
             m_strGccVersion = strPath;
+            InFile.Close();
         }
+        DeleteFile(chTempPath);
         if ( strPath == "" )
         {
             return S_FALSE;
         }
-        DeleteFile(chTempPath);
     }
     else
     {

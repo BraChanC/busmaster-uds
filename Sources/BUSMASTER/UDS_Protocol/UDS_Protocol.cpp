@@ -128,19 +128,30 @@ BOOL CUDS_Protocol::InitInstance()
 USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels)
 {
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
-    CWnd* pParent = CWnd::FromHandle(hParent);
+
+    if (omMainWnd != NULL && !::IsWindow(omMainWnd->GetSafeHwnd()))
+    {
+        omMainWnd = NULL;
+    }
 
     if (omMainWnd == NULL)
     {
-        omMainWnd = new CUDSMainWnd(omManagerPtr->SourceAddress, omManagerPtr->TargetAddress, omManagerPtr->fInterface,omManagerPtr->MsgID, pParent);
-        omMainWnd->TotalChannel = TotalChannels;
-        if (!omMainWnd->Create(IDM_UDS, pParent))
+        CUDSMainWnd* pDlg = new CUDSMainWnd(omManagerPtr->SourceAddress, omManagerPtr->TargetAddress, omManagerPtr->fInterface,omManagerPtr->MsgID, NULL);
+        pDlg->TotalChannel = TotalChannels;
+        if (!pDlg->Create(IDM_UDS, NULL))
         {
-            delete omMainWnd;
-            omMainWnd = NULL;
+            delete pDlg;
             return E_FAIL;
         }
-        NegRespManager = new CUDS_NegRespMng(omManagerPtr);
+        if (hParent != NULL)
+        {
+            ::SetWindowLongPtr(pDlg->GetSafeHwnd(), GWLP_HWNDPARENT, (LONG_PTR)hParent);
+        }
+        omMainWnd = pDlg;
+        if (NegRespManager == NULL)
+        {
+            NegRespManager = new CUDS_NegRespMng(omManagerPtr);
+        }
     }
     else
     {
@@ -269,6 +280,25 @@ void CUDS_Protocol::Show_ResponseData(unsigned char psMsg[], unsigned char Datal
 
 USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
 {
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    CUDSMainWnd* pMainWnd = omMainWnd;
+    if (pMainWnd == NULL || !::IsWindow(pMainWnd->GetSafeHwnd()))
+    {
+        return 0;
+    }
+
+    DWORD dwUiTid = GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL);
+    if (dwUiTid != GetCurrentThreadId())
+    {
+        STCAN_MSG* pCopy = new STCAN_MSG;
+        *pCopy = Mensaje;
+        if (!pMainWnd->PostMessage(WM_UDS_EVALUATE_MSG, 0, (LPARAM)pCopy))
+        {
+            delete pCopy;
+        }
+        return 0;
+    }
+
     unsigned char psMsg[64];
     memcpy( psMsg , Mensaje.m_ucData , 64);
     unsigned char Datalen = Mensaje.m_ucDataLen;
@@ -280,16 +310,12 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
     UINT Check_MSG_received;
 
     // -------for checking also if the SA and TA are inserted in Main window and settings window holds only the base address (0x18DA0000)- Variable used is "Check_MSG_received" - Casian
-    if(omMainWnd!=NULL)
-    {
-        Check_SourceAddress = omMainWnd->m_omSourceAddress.lGetValue()<<8;
-        Check_TargetAddress = omMainWnd->m_omTargetAddress.lGetValue();
+    Check_SourceAddress = pMainWnd->m_omSourceAddress.lGetValue()<<8;
+    Check_TargetAddress = pMainWnd->m_omTargetAddress.lGetValue();
 
-        Check_MSG_received = respID + (Check_TargetAddress) + Check_SourceAddress;
-    }
+    Check_MSG_received = respID + (Check_TargetAddress) + Check_SourceAddress;
     // Datalen is the DLC of the message received
-    AFX_MANAGE_STATE(AfxGetStaticModuleState());
-    if(omMainWnd!=NULL && FSending && (respID == MessageID || Check_MSG_received == MessageID) && Current_Channel == Channel)    // -------  // Evaluates the received message when: 1.MainWnd created - 2. Response to my Msg - 3.I've sent something
+    if(FSending && (respID == MessageID || Check_MSG_received == MessageID) && Current_Channel == Channel)    // -------  // Evaluates the received message when: 1.MainWnd created - 2. Response to my Msg - 3.I've sent something
     {
 
         TYPE_OF_FRAME TypeofFrame = omManagerPtr->getFrameType(psMsg[initialByte]);     // This is a general function because it uses the variable initialByte

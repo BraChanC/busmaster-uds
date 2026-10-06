@@ -17,6 +17,8 @@
 #include "IBusMasterKernel.h"
 #include <afxdlgs.h>
 CUDSMainWnd* CUDSMainWnd::m_spodInstance = NULL;
+extern CUDSMainWnd* omMainWnd;
+extern "C" HRESULT EvaluateMessage(STCAN_MSG Mensaje);
 
 BOOL FWait_SendingFrame=FALSE;
 /** This variable is used to indicate that the system should wait for a flow control */
@@ -117,6 +119,8 @@ BEGIN_MESSAGE_MAP(CUDSMainWnd, CDialog)
     ON_WM_KEYDOWN ()
     ON_WM_CHAR ()
     ON_MESSAGE (WM_COMMANDHELP, CUDSMainWnd::OnCommandHelp )
+    ON_MESSAGE (WM_UDS_EVALUATE_MSG, OnEvaluateCanMsg )
+    ON_WM_DESTROY()
 
 END_MESSAGE_MAP()
 
@@ -761,6 +765,10 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
 HBRUSH CUDSMainWnd::OnCtlColor(CDC* pDC, CWnd* pWnd, UINT nCtlColor)
 {
     HBRUSH hbr =  CDialog::OnCtlColor( pDC,  pWnd,  nCtlColor);
+    if (pWnd == NULL || !::IsWindow(pWnd->m_hWnd))
+    {
+        return hbr;
+    }
     UINT nIDD = pWnd->GetDlgCtrlID();
 
     switch(nIDD)
@@ -824,6 +832,10 @@ void CUDSMainWnd::OnBnClickedTesterPresent()
 void CUDSMainWnd::OnEnChangeData()
 {
     CEdit* e = (CEdit*)GetDlgItem(IDC_EDIT_DATA);
+    if (e == NULL || !::IsWindow(e->m_hWnd))
+    {
+        return;
+    }
 
     UpdateData();
     CString omByteStr;
@@ -1113,7 +1125,11 @@ void CUDSMainWnd::vInitializeUDSfFields()
     m_omComboChannelUDS.SetCurSel(0);
     m_omEditDLC.vSetValue(0);
     m_Font.CreatePointFont(110, "Courier");
-    GetDlgItem(IDC_RESPONSE_DATA)->SetFont(&m_Font);
+    CWnd* pResponse = GetDlgItem(IDC_RESPONSE_DATA);
+    if (pResponse != NULL && ::IsWindow(pResponse->m_hWnd))
+    {
+        pResponse->SetFont(&m_Font);
+    }
     m_Font.Detach();
     m_Font.CreateFont(               14,                        // nHeight
                                      5,                         // nWidth
@@ -1130,7 +1146,11 @@ void CUDSMainWnd::vInitializeUDSfFields()
                                      DEFAULT_PITCH | FF_ROMAN,  // nPitchAndFamily
                                      "Arial");                  // Facename
 
-    GetDlgItem(IDC_DIAG_SERVICE)->SetFont(&m_Font);
+    CWnd* pService = GetDlgItem(IDC_DIAG_SERVICE);
+    if (pService != NULL && ::IsWindow(pService->m_hWnd))
+    {
+        pService->SetFont(&m_Font);
+    }
 }
 
 //________________________________________________________________________________________________________________________________________________________________
@@ -1323,6 +1343,31 @@ LRESULT CUDSMainWnd::OnCommandHelp ( WPARAM wParam, LPARAM lParam )
     ::HtmlHelp ( nullptr, strChmFilePath, HH_DISPLAY_TOPIC, 0 );
 
     return S_OK;
+}
+
+LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM /*wParam*/, LPARAM lParam)
+{
+    STCAN_MSG* pMsg = reinterpret_cast<STCAN_MSG*>(lParam);
+    if (pMsg != nullptr)
+    {
+        EvaluateMessage(*pMsg);
+        delete pMsg;
+    }
+    return 0;
+}
+
+void CUDSMainWnd::OnDestroy()
+{
+    MSG msg;
+    while (PeekMessage(&msg, m_hWnd, WM_UDS_EVALUATE_MSG, WM_UDS_EVALUATE_MSG, PM_REMOVE))
+    {
+        delete reinterpret_cast<STCAN_MSG*>(msg.lParam);
+    }
+    if (omMainWnd == this)
+    {
+        omMainWnd = NULL;
+    }
+    CDialog::OnDestroy();
 }
 
 void CUDSMainWnd::AppendLog(const CString& omText)

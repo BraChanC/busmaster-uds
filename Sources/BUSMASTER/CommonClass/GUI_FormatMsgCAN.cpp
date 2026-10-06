@@ -263,15 +263,15 @@ void CFormatMsgCAN::vFormatCANDataMsg(STCANDATA* pMsgCAN,
                                       SFORMATTEDDATA_CAN* CurrDataCAN,
                                       BYTE bExprnFlag_Log)
 {
-    if (RX_FLAG == pMsgCAN->m_ucDataType)
-    {
-        CurrDataCAN->m_eDirection = DIR_RX;
-        CurrDataCAN->m_acMsgDir[0] = 'R';
-    }
-    else if (TX_FLAG == pMsgCAN->m_ucDataType)
+    if (IS_TX_MESSAGE(pMsgCAN->m_ucDataType))
     {
         CurrDataCAN->m_eDirection = DIR_TX;
         CurrDataCAN->m_acMsgDir[0] = 'T';
+    }
+    else
+    {
+        CurrDataCAN->m_eDirection = DIR_RX;
+        CurrDataCAN->m_acMsgDir[0] = 'R';
     }
     CurrDataCAN->m_acMsgDir[1] = 'x';
 

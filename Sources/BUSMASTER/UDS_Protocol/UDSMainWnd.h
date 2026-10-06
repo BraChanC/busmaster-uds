@@ -125,7 +125,7 @@ public:
 
     CFont m_Font;
 
-    // Declaraciùn de funciones
+    // DeclaraciÔøΩn de funciones
     void vInitializeUDSfFields();
     void SyncToProtocol();
 
@@ -224,6 +224,8 @@ public:
     afx_msg void OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags);
     afx_msg BOOL PreTranslateMessage(MSG* pMsg);
     afx_msg LRESULT OnCommandHelp ( WPARAM wParam, LPARAM lParam );
+    afx_msg LRESULT OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam);
+    afx_msg void OnDestroy();
     afx_msg void OnTvnSelchangedServices(NMHDR* pNMHDR, LRESULT* pResult);
     afx_msg void OnBnClickedAdd();
     afx_msg void OnBnClickedDelete();

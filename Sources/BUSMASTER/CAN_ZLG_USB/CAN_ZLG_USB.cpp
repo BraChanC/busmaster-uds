@@ -6,6 +6,8 @@
 #include <vector>
 #include <algorithm>
 #include <math.h>
+#include <setupapi.h>
+#pragma comment(lib, "setupapi.lib")
 
 #include "BaseDIL_CAN_Controller.h"
 #include "DILPluginHelperDefs.h"
@@ -66,13 +68,26 @@ struct SZLG_USB_TYPE
 {
     UINT unType;
     UINT unDefCh;
+    BOOL bCanFd;
     const char* pcName;
 };
 
 static const SZLG_USB_TYPE sg_asUsbTypes[] =
 {
-    {ZCAN_USBCANFD_200U, 2, "USBCANFD-200U"}
+    {ZCAN_USBCAN1,         1, FALSE, "USBCAN-I"},
+    {ZCAN_USBCAN2,         2, FALSE, "USBCAN-II"},
+    {ZCAN_USBCAN_E_U,      1, FALSE, "USBCAN-E-U"},
+    {ZCAN_USBCAN_2E_U,     2, FALSE, "USBCAN-2E-U"},
+    {ZCAN_USBCAN_4E_U,     4, FALSE, "USBCAN-4E-U"},
+    {ZCAN_USBCAN_8E_U,     8, FALSE, "USBCAN-8E-U"},
+    {ZCAN_USBCANFD_MINI,   1, TRUE,  "USBCANFD-MINI"},
+    {ZCAN_USBCANFD_100U,   1, TRUE,  "USBCANFD-100U"},
+    {ZCAN_USBCANFD_200U,   2, TRUE,  "USBCANFD-200U"},
+    {ZCAN_USBCANFD_400U,   4, TRUE,  "USBCANFD-400U"},
+    {ZCAN_USBCANFD_800U,   8, TRUE,  "USBCANFD-800U"}
 };
+static const int sg_nUsbTypeCount = (int)(sizeof(sg_asUsbTypes) / sizeof(sg_asUsbTypes[0]));
+static int sg_nSelectedModel = -1;
 
 static SCLIENTBUFMAP sg_asClientToBufMap[MAX_CLIENT_ALLOWED];
 static UINT sg_unClientCnt = 0;
@@ -102,6 +117,54 @@ static DEVICE_HANDLE sg_ahDevice[MAX_ZLG_CHANNELS] = {0};
 static CHANNEL_HANDLE sg_ahChannel[MAX_ZLG_CHANNELS] = {0};
 static HANDLE sg_hRxThread = nullptr;
 static volatile BOOL sg_bRxRun = FALSE;
+static STCAN_MSG sg_asLastTx[MAX_ZLG_CHANNELS];
+static BOOL sg_abLastTxValid[MAX_ZLG_CHANNELS] = {0};
+static LARGE_INTEGER sg_alnLastTxQpc[MAX_ZLG_CHANNELS] = {0};
+
+static void RememberTx(int nChannelIndex, const STCAN_MSG& sMsg)
+{
+    if (nChannelIndex < 0 || nChannelIndex >= MAX_ZLG_CHANNELS)
+    {
+        return;
+    }
+    sg_asLastTx[nChannelIndex] = sMsg;
+    sg_abLastTxValid[nChannelIndex] = TRUE;
+    QueryPerformanceCounter(&sg_alnLastTxQpc[nChannelIndex]);
+}
+
+static BOOL IsTxEchoFrame(int nChannelIndex, UINT unId, const BYTE* pucData, BYTE ucLen, BYTE ucEchoFlag)
+{
+    if ((ucEchoFlag & CANFD_TX_ECHO) != 0)
+    {
+        if (nChannelIndex >= 0 && nChannelIndex < MAX_ZLG_CHANNELS)
+        {
+            sg_abLastTxValid[nChannelIndex] = FALSE;
+        }
+        return TRUE;
+    }
+    if (nChannelIndex < 0 || nChannelIndex >= MAX_ZLG_CHANNELS || !sg_abLastTxValid[nChannelIndex])
+    {
+        return FALSE;
+    }
+    const STCAN_MSG& tx = sg_asLastTx[nChannelIndex];
+    if (tx.m_unMsgID != (unId & CAN_ID_FLAG) || tx.m_ucDataLen != ucLen)
+    {
+        return FALSE;
+    }
+    if (ucLen > 0 && memcmp(tx.m_ucData, pucData, ucLen) != 0)
+    {
+        return FALSE;
+    }
+    LARGE_INTEGER lnNow;
+    QueryPerformanceCounter(&lnNow);
+    LONGLONG llFreq = sg_lnFrequency.QuadPart != 0 ? sg_lnFrequency.QuadPart : 1;
+    if ((lnNow.QuadPart - sg_alnLastTxQpc[nChannelIndex].QuadPart) > (llFreq / 20))
+    {
+        return FALSE;
+    }
+    sg_abLastTxValid[nChannelIndex] = FALSE;
+    return TRUE;
+}
 
 static HMODULE sg_hZlg = nullptr;
 static char sg_acZlgDir[MAX_PATH] = {0};
@@ -149,10 +212,77 @@ static CDIL_CAN_ZLG_USB* g_pouDIL_CAN_ZLG_USB = nullptr;
 
 static BOOL IsUsbCanFdType(UINT unType)
 {
-    return unType == ZCAN_USBCANFD_200U || unType == ZCAN_USBCANFD_100U ||
-           unType == ZCAN_USBCANFD_MINI || unType == ZCAN_USBCANFD_800U ||
-           unType == ZCAN_USBCANFD_400U;
+    for (int i = 0; i < sg_nUsbTypeCount; i++)
+    {
+        if (sg_asUsbTypes[i].unType == unType)
+        {
+            return sg_asUsbTypes[i].bCanFd;
+        }
+    }
+    return FALSE;
 }
+
+static int DefaultZlgModelIndex()
+{
+    for (int i = 0; i < sg_nUsbTypeCount; i++)
+    {
+        if (sg_asUsbTypes[i].unType == ZCAN_USBCANFD_200U)
+        {
+            return i;
+        }
+    }
+    return 0;
+}
+
+class CZlgModelDlg : public CDialog
+{
+public:
+    int m_nSel;
+    CZlgModelDlg()
+        : CDialog(IDD_ZLG_MODEL, nullptr)
+        , m_nSel(DefaultZlgModelIndex())
+    {
+    }
+
+    BOOL OnInitDialog()
+    {
+        CDialog::OnInitDialog();
+        CListBox* pList = (CListBox*)GetDlgItem(IDC_ZLG_MODEL_LIST);
+        if (pList == nullptr)
+        {
+            return TRUE;
+        }
+        for (int i = 0; i < sg_nUsbTypeCount; i++)
+        {
+            CString om;
+            om.Format("%-18s    %u ch    %s",
+                      sg_asUsbTypes[i].pcName,
+                      sg_asUsbTypes[i].unDefCh,
+                      sg_asUsbTypes[i].bCanFd ? "CAN FD" : "CAN");
+            pList->AddString(om);
+        }
+        if (m_nSel < 0 || m_nSel >= sg_nUsbTypeCount)
+        {
+            m_nSel = DefaultZlgModelIndex();
+        }
+        pList->SetCurSel(m_nSel);
+        return TRUE;
+    }
+
+    void OnOK()
+    {
+        CListBox* pList = (CListBox*)GetDlgItem(IDC_ZLG_MODEL_LIST);
+        if (pList != nullptr)
+        {
+            int nSel = pList->GetCurSel();
+            if (nSel >= 0)
+            {
+                m_nSel = nSel;
+            }
+        }
+        CDialog::OnOK();
+    }
+};
 
 static BOOL bIsBufferExists(const SCLIENTBUFMAP& sClientObj, const CBaseCANBufFSE* pBuf)
 {
@@ -387,6 +517,60 @@ public:
     }
 };
 
+static BOOL IsInvalidZlgHandle(const void* h)
+{
+    if (h == nullptr)
+    {
+        return TRUE;
+    }
+    if (h == (const void*)(INT_PTR)-1)
+    {
+        return TRUE;
+    }
+    if (h == (const void*)(UINT_PTR)0xFFFFFFFF)
+    {
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL IsZlgUsbPresent(void)
+{
+    HDEVINFO hList = SetupDiGetClassDevsA(nullptr, "USB", nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (hList == INVALID_HANDLE_VALUE)
+    {
+        return FALSE;
+    }
+    SP_DEVINFO_DATA sInfo;
+    sInfo.cbSize = sizeof(sInfo);
+    BOOL bFound = FALSE;
+    for (DWORD dwIndex = 0; SetupDiEnumDeviceInfo(hList, dwIndex, &sInfo); dwIndex++)
+    {
+        char acBuf[1024] = {0};
+        const DWORD adwProps[] = { SPDRP_HARDWAREID, SPDRP_COMPATIBLEIDS, SPDRP_FRIENDLYNAME, SPDRP_DEVICEDESC };
+        for (int nProp = 0; nProp < 4 && !bFound; nProp++)
+        {
+            memset(acBuf, 0, sizeof(acBuf));
+            if (!SetupDiGetDeviceRegistryPropertyA(hList, &sInfo, adwProps[nProp], nullptr,
+                    (PBYTE)acBuf, sizeof(acBuf) - 1, nullptr))
+            {
+                continue;
+            }
+            _strupr_s(acBuf, sizeof(acBuf));
+            if (strstr(acBuf, "VID_3068") != nullptr ||
+                strstr(acBuf, "VID_C72B") != nullptr ||
+                strstr(acBuf, "USBCAN") != nullptr ||
+                strstr(acBuf, "USB-CAN") != nullptr ||
+                strstr(acBuf, "USBCANFD") != nullptr)
+            {
+                bFound = TRUE;
+            }
+        }
+    }
+    SetupDiDestroyDeviceInfoList(hList);
+    return bFound;
+}
+
 static DEVICE_HANDLE ZlgOpenDeviceSafe(UINT unType, UINT unIndex)
 {
     DEVICE_HANDLE hDev = nullptr;
@@ -402,9 +586,9 @@ static DEVICE_HANDLE ZlgOpenDeviceSafe(UINT unType, UINT unIndex)
     {
         hDev = nullptr;
     }
-    if (hDev == (DEVICE_HANDLE)(INT_PTR)-1)
+    if (IsInvalidZlgHandle(hDev))
     {
-        hDev = nullptr;
+        return nullptr;
     }
     return hDev;
 }
@@ -442,26 +626,93 @@ static BOOL ZlgGetDeviceInfSafe(DEVICE_HANDLE hDev, ZCAN_DEVICE_INFO* pInfo)
     return unRet == STATUS_OK;
 }
 
-static INT EnumerateZlgChannels(INTERFACE_HW_LIST& asList)
+static CHANNEL_HANDLE ZlgInitCanSafe(DEVICE_HANDLE hDev, UINT unCh, ZCAN_CHANNEL_INIT_CONFIG* pCfg)
 {
-    /* Do not call ZCAN_OpenDevice while listing. Opening absent types
-       raises 0xC000041D inside zlgcan callbacks and cannot be caught. */
-    INT nFound = 0;
-    for (int nType = 0; nType < (int)(sizeof(sg_asUsbTypes) / sizeof(sg_asUsbTypes[0])); nType++)
+    CHANNEL_HANDLE hCh = nullptr;
+    if (hDev == nullptr || pCfg == nullptr || sg_InitCAN == nullptr)
     {
-        UINT unChCount = sg_asUsbTypes[nType].unDefCh;
-        for (UINT unCh = 0; unCh < unChCount && nFound < (INT)defCHANNEL_CAN_MAX; unCh++)
-        {
-            char acName[80] = {0};
-            sprintf_s(acName, "%s CH%u", sg_asUsbTypes[nType].pcName, unCh);
-            asList[nFound].m_dwVendor = sg_asUsbTypes[nType].unType;
-            asList[nFound].m_dwIdInterface = unCh;
-            asList[nFound].m_bytNetworkID = (unsigned char)unCh;
-            asList[nFound].m_acNameInterface = acName;
-            asList[nFound].m_acDescription = acName;
-            asList[nFound].m_acDeviceName = sg_asUsbTypes[nType].pcName;
-            nFound++;
-        }
+        return nullptr;
+    }
+    __try
+    {
+        hCh = sg_InitCAN(hDev, unCh, pCfg);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        hCh = nullptr;
+    }
+    if (IsInvalidZlgHandle(hCh))
+    {
+        return nullptr;
+    }
+    return hCh;
+}
+
+static INT EnumerateZlgChannels(INTERFACE_HW_LIST& asList, int nModel)
+{
+    if (nModel < 0 || nModel >= sg_nUsbTypeCount)
+    {
+        nModel = DefaultZlgModelIndex();
+    }
+    /* zlgcan OpenDevice can return a dummy handle with no USB. Require a
+       present USB device, valid device info, and InitCAN on channel 0. */
+    if (!IsZlgUsbPresent())
+    {
+        return 0;
+    }
+    CZlgDirGuard ouDir;
+    DEVICE_HANDLE hDev = ZlgOpenDeviceSafe(sg_asUsbTypes[nModel].unType, 0);
+    if (hDev == nullptr)
+    {
+        return 0;
+    }
+    ZCAN_DEVICE_INFO sInf;
+    memset(&sInf, 0, sizeof(sInf));
+    if (!ZlgGetDeviceInfSafe(hDev, &sInf) || sInf.can_Num == 0)
+    {
+        ZlgCloseDeviceSafe(hDev);
+        return 0;
+    }
+    ZCAN_CHANNEL_INIT_CONFIG cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (sg_asUsbTypes[nModel].bCanFd)
+    {
+        cfg.can_type = TYPE_CANFD;
+        cfg.canfd.acc_mask = 0xFFFFFFFF;
+    }
+    else
+    {
+        cfg.can_type = TYPE_CAN;
+        cfg.can.acc_mask = 0xFFFFFFFF;
+    }
+    CHANNEL_HANDLE hCh = ZlgInitCanSafe(hDev, 0, &cfg);
+    if (hCh == nullptr)
+    {
+        ZlgCloseDeviceSafe(hDev);
+        return 0;
+    }
+    if (sg_ResetCAN != nullptr)
+    {
+        sg_ResetCAN(hCh);
+    }
+    ZlgCloseDeviceSafe(hDev);
+    UINT unChCount = sInf.can_Num;
+    if (unChCount > defCHANNEL_CAN_MAX)
+    {
+        unChCount = defCHANNEL_CAN_MAX;
+    }
+    INT nFound = 0;
+    for (UINT unCh = 0; unCh < unChCount && nFound < (INT)defCHANNEL_CAN_MAX; unCh++)
+    {
+        char acName[80] = {0};
+        sprintf_s(acName, "%s CH%u", sg_asUsbTypes[nModel].pcName, unCh);
+        asList[nFound].m_dwVendor = sg_asUsbTypes[nModel].unType;
+        asList[nFound].m_dwIdInterface = unCh;
+        asList[nFound].m_bytNetworkID = (unsigned char)unCh;
+        asList[nFound].m_acNameInterface = acName;
+        asList[nFound].m_acDescription = acName;
+        asList[nFound].m_acDeviceName = sg_asUsbTypes[nModel].pcName;
+        nFound++;
     }
     return nFound;
 }
@@ -486,13 +737,17 @@ static void DispatchCan(int nChannelIndex, const zlg_can_frame& frame, UINT64 ts
     {
         return;
     }
+    BYTE ucLen = frame.can_dlc > 8 ? 8 : frame.can_dlc;
+    if (IsTxEchoFrame(nChannelIndex, frame.can_id, frame.data, ucLen, (BYTE)(frame.__pad | frame.__res0)))
+    {
+        return;
+    }
     STCANDATA can_data;
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = RX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_unMsgID = frame.can_id & CAN_ID_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_ucEXTENDED = (frame.can_id & CAN_EFF_FLAG) ? 1 : 0;
     can_data.m_uDataInfo.m_sCANMsg.m_ucRTR = (frame.can_id & CAN_RTR_FLAG) ? 1 : 0;
-    BYTE ucLen = frame.can_dlc > 8 ? 8 : frame.can_dlc;
     can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLen;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nChannelIndex + 1);
     can_data.m_uDataInfo.m_sCANMsg.m_bCANFD = false;
@@ -507,13 +762,17 @@ static void DispatchFd(int nChannelIndex, const zlg_canfd_frame& frame, UINT64 t
     {
         return;
     }
+    BYTE ucLen = frame.len > 64 ? 64 : frame.len;
+    if (IsTxEchoFrame(nChannelIndex, frame.can_id, frame.data, ucLen, (BYTE)(frame.flags | frame.__res0)))
+    {
+        return;
+    }
     STCANDATA can_data;
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = RX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_unMsgID = frame.can_id & CAN_ID_FLAG;
     can_data.m_uDataInfo.m_sCANMsg.m_ucEXTENDED = (frame.can_id & CAN_EFF_FLAG) ? 1 : 0;
     can_data.m_uDataInfo.m_sCANMsg.m_ucRTR = (frame.can_id & CAN_RTR_FLAG) ? 1 : 0;
-    BYTE ucLen = frame.len > 64 ? 64 : frame.len;
     can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLen;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nChannelIndex + 1);
     can_data.m_uDataInfo.m_sCANMsg.m_bCANFD = true;
@@ -1373,8 +1632,18 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_GetTimeModeMapping(SYSTEMTIME& CurrSysTime, UINT64
 
 HRESULT CDIL_CAN_ZLG_USB::CAN_ListHwInterfaces(INTERFACE_HW_LIST& sSelHwInterface, INT& nCount, PSCONTROLLER_DETAILS InitData)
 {
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+
+    CZlgModelDlg ouModel;
+    ouModel.m_nSel = (sg_nSelectedModel >= 0) ? sg_nSelectedModel : DefaultZlgModelIndex();
+    if (ouModel.DoModal() != IDOK)
+    {
+        return HW_INTERFACE_NO_SEL;
+    }
+    sg_nSelectedModel = ouModel.m_nSel;
+
     INTERFACE_HW_LIST asFound = {};
-    INT nFound = EnumerateZlgChannels(asFound);
+    INT nFound = EnumerateZlgChannels(asFound, sg_nSelectedModel);
     if (nFound <= 0)
     {
         nCount = 0;
@@ -1382,26 +1651,19 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_ListHwInterfaces(INTERFACE_HW_LIST& sSelHwInterfac
         return S_FALSE;
     }
 
-    AFX_MANAGE_STATE(AfxGetStaticModuleState());
     int anSelList[CHANNEL_ALLOWED];
     for (int i = 0; i < CHANNEL_ALLOWED; i++)
     {
-        anSelList[i] = -1;
+        anSelList[i] = (i < nFound) ? i : -1;
     }
-    if (nFound >= 1)
-    {
-        anSelList[0] = 0;
-    }
-    if (nFound >= 2)
-    {
-        anSelList[1] = 1;
-    }
+    const BOOL bModelFd = (sg_nSelectedModel >= 0 && sg_nSelectedModel < sg_nUsbTypeCount)
+        ? sg_asUsbTypes[sg_nSelectedModel].bCanFd : TRUE;
     if (InitData != nullptr)
     {
         for (INT i = 0; i < nFound; i++)
         {
-            InitData[i].m_bcanFDEnabled = true;
-            InitData[i].m_bSupportCANFD = true;
+            InitData[i].m_bcanFDEnabled = bModelFd ? true : false;
+            InitData[i].m_bSupportCANFD = bModelFd ? true : false;
             InitData[i].m_bISO = true;
             if (InitData[i].m_unDataBitRate == 0)
             {
@@ -1592,6 +1854,7 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_StartHardware(void)
             return S_FALSE;
         }
         SetAsciiValue(hDev, sg_aunCh[i], "initenal_resistance", sg_abTerm[i] ? "1" : "0");
+        SetAsciiValue(hDev, sg_aunCh[i], "set_device_tx_echo", "0");
         if (sg_StartCAN(sg_ahChannel[i]) != STATUS_OK)
         {
             sg_acErrStr = "ZCAN_StartCAN failed.";
@@ -1716,7 +1979,9 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxM
     memset(&can_data, 0, sizeof(can_data));
     can_data.m_ucDataType = TX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg = sCanTxMsg;
+    can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nIndex + 1);
     QueryPerformanceCounter(&can_data.m_lTickCount);
+    RememberTx(nIndex, can_data.m_uDataInfo.m_sCANMsg);
     EnterCriticalSection(&sg_DIL_CriticalSection);
     vWriteIntoClientsBuffer(can_data);
     LeaveCriticalSection(&sg_DIL_CriticalSection);

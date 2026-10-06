@@ -463,9 +463,20 @@ HRESULT PerformAnOperation(BYTE bActionCode)
 {
     HRESULT hResult = S_FALSE;
 
-    if ( !sg_bBrokerCsInit )
+    if ( !sg_bBrokerCsInit || nullptr == sg_hNotifyFinish
+            || nullptr == sg_sBrokerObjBusEmulation.m_hActionEvent )
     {
         return hResult;
+    }
+
+    static LONG s_nBrokerStarted = 0;
+    if (InterlockedCompareExchange(&s_nBrokerStarted, 1, 0) == 0)
+    {
+        if (sg_sBrokerObjBusEmulation.bStartThread(BrokerThreadBusEmulation) == FALSE)
+        {
+            InterlockedExchange(&s_nBrokerStarted, 0);
+            return hResult;
+        }
     }
 
     if ( TryEnterCriticalSection ( &sg_CSBroker ) )
@@ -782,6 +793,11 @@ HRESULT CDIL_CAN_STUB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxMsg)
 {
     HRESULT hResult = S_FALSE;
 
+    if (!sg_bBrokerCsInit || nullptr == sg_hNotifyFinish)
+    {
+        return hResult;
+    }
+
     // Lock so that no other thread may use the common resources
     EnterCriticalSection(&sg_CSBroker);
 
@@ -794,7 +810,7 @@ HRESULT CDIL_CAN_STUB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxMsg)
     // Now release the harness
     SetEvent(sg_sBrokerObjBusEmulation.m_hActionEvent);
     // Wait until current assignment of broker thread is over
-    WaitForSingleObject(sg_hNotifyFinish, INFINITE);
+    WaitForSingleObject(sg_hNotifyFinish, 2000);
     // Save the result
     hResult = sg_hResult;
 
@@ -855,35 +871,28 @@ HRESULT CDIL_CAN_STUB::CAN_GetLastErrorString(std::string& acErrorStr)
 
 HRESULT CDIL_CAN_STUB::CAN_PerformInitOperations(void)
 {
-    HRESULT hResult = S_FALSE;
-
     if (!sg_bBrokerCsInit)
     {
         InitializeCriticalSection(&sg_CSBroker);
         sg_bBrokerCsInit = true;
     }
 
-    // Create the notification event
-    sg_hNotifyFinish = CreateEvent(nullptr, false, false, nullptr);
-    if (nullptr != sg_hNotifyFinish)
+    if (nullptr == sg_hNotifyFinish)
     {
-        // Then create the broker worker thread
+        sg_hNotifyFinish = CreateEvent(nullptr, false, false, nullptr);
+    }
+    if (nullptr == sg_sBrokerObjBusEmulation.m_hActionEvent)
+    {
         sg_sBrokerObjBusEmulation.m_hActionEvent = CreateEvent(nullptr, false,
                 false, nullptr);
+    }
+    if (nullptr != sg_hNotifyFinish && nullptr != sg_sBrokerObjBusEmulation.m_hActionEvent)
+    {
         ResetEvent(sg_sBrokerObjBusEmulation.m_hActionEvent);
         sg_sBrokerObjBusEmulation.m_unActionCode = INACTION;
-        if (sg_sBrokerObjBusEmulation.bStartThread(BrokerThreadBusEmulation))
-        {
-            hResult = S_OK;
-        }
-        else
-        {
-            CloseHandle(sg_hNotifyFinish);
-            sg_hNotifyFinish = nullptr;
-        }
+        return S_OK;
     }
-
-    return hResult;
+    return S_FALSE;
 }
 
 /**
@@ -897,25 +906,10 @@ HRESULT CDIL_CAN_STUB::CAN_GetCurrStatus( STATUSMSG& StatusData )
 
 HRESULT CDIL_CAN_STUB::CAN_PerformClosureOperations(void)
 {
-    while (sg_unClientCnt > 0)
-    {
-        DWORD dwClientId = sg_asClientToBufMap[0].dwClientID;
-        if (!bRemoveClient(dwClientId))
-        {
-            if (sg_unClientCnt > 0)
-            {
-                sg_unClientCnt--;
-            }
-            else
-            {
-                break;
-            }
-        }
-    }
-    CAN_DeselectHwInterface();
-    sg_sBrokerObjBusEmulation.bTerminateThread();
+    sg_unClientCnt = 0;
     if (nullptr != sg_hNotifyFinish)
     {
+        SetEvent(sg_hNotifyFinish);
         CloseHandle(sg_hNotifyFinish);
         sg_hNotifyFinish = nullptr;
     }

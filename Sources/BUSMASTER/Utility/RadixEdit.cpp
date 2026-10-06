@@ -265,6 +265,10 @@ int CRadixEdit::nGetBase()
 ******************************************************************************/
 void CRadixEdit::OnChange()
 {
+    if (!::IsWindow(GetSafeHwnd()))
+    {
+        return;
+    }
     int nBufLength = LineLength() + 1;
     CString     strBuffer;
     //char* acBuffer= new char[1786];

@@ -142,3 +142,11 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 - `Sources/BUSMASTER/Application/Res/ribbon1.mfcribbon-ms` — ECU Flash Ribbon  
 
 原版未包含上述刷写编排、HEX/S19/MOT 解析块列表、ZLG 插件与 Settings/Diagnostic 双向同步。
+
+---
+
+## 8. 关于 DBManager（官方 3.0.0 起闭源）
+
+官方从 **BUSMASTER 3.0.0** 开始不再公开 `DBManager` 源码，3.x 树里只有发行用的 DLL，没有 `DBManager.sln`。本仓库同样没有该工程，编 **BUSMASTER.sln** 时跳过即可。
+
+最后一份开源工程在 **2.6.4**：`busmaster-2.6.4/Sources/DBManager/DBManager.sln`（LIN LDF cluster 库，给当时的 LDFEditor / LDFViewer 用）。不要把 3.0 安装包里的 `DBManager.dll` 当成可编译源码。
