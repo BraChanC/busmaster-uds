@@ -150,3 +150,29 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 官方从 **BUSMASTER 3.0.0** 开始不再公开 `DBManager` 源码，3.x 树里只有发行用的 DLL，没有 `DBManager.sln`。本仓库同样没有该工程，编 **BUSMASTER.sln** 时跳过即可。
 
 最后一份开源工程在 **2.6.4**：`busmaster-2.6.4/Sources/DBManager/DBManager.sln`（LIN LDF cluster 库，给当时的 LDFEditor / LDFViewer 用）。不要把 3.0 安装包里的 `DBManager.dll` 当成可编译源码。
+
+---
+
+## 9. 已修复：监控报文时打开 Diagnostic 崩溃
+
+**现象**
+
+- 使用 PCAN（或其它 CAN 驱动）连接并正在收发/监控报文时，打开 **Main Diagnostic Window**，Debug 版弹出 MFC 断言：`afxwin1.inl` / `mfc140d.dll`（`IsWindow(m_hWnd)`），随后生成 `BUSMASTER.dmp`。
+
+**原因**
+
+1. CAN 读线程里直接调用 `EvaluateMessage()`，对 Diagnostic 控件做 `lGetValue()` / `UpdateData()` 等 UI 操作（跨线程访问 MFC 窗口）。
+2. `DIL_UDS_ShowWnd` 在 `Create` 完成前就把 `omMainWnd` 挂出去，读线程看到非空指针时控件 HWND 尚未就绪。
+
+**修复要点**
+
+- 非 UI 线程收到报文时，通过 `PostMessage(WM_UDS_EVALUATE_MSG)` 回到 Diagnostic 窗口线程再处理。
+- 仅在 `Create` 成功后设置 `omMainWnd`；关闭窗口时清空队列并置空指针。
+- `OnCtlColor`、`SetFont`、`CRadixEdit::OnChange` 增加 `IsWindow` 保护。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/UDS_Protocol/UDS_Protocol.cpp`
+- `Sources/BUSMASTER/UDS_Protocol/UDSMainWnd.*`
+- `Sources/BUSMASTER/UDS_Protocol/UDSWnd_Defines.h`
+- `Sources/BUSMASTER/Utility/RadixEdit.cpp`

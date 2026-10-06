@@ -3,6 +3,8 @@ NeoBusmaster（UDS / ECU Flash 增强）
 
 相对原始 BUSMASTER 的功能说明、用法见仓库根目录 **[CHANGES.md](CHANGES.md)**。
 
+近期修复：监控 CAN 报文时打开 Diagnostic 会崩溃（PCAN 等驱动下复现）——说明见 [CHANGES.md §9](CHANGES.md#9-已修复监控报文时打开-diagnostic-崩溃)。
+
 这是从 https://github.com/rbei-etas/busmaster.git 延续的工程。本分支在诊断、ECU 刷写和周立功 CANFD 上有本地增强。
 
 不得不承认，这是一个极其复杂的工程，由于其原本采用的技术和开发工具都已经很古老，这里将尝试使用这些开发工具中较新的版本，不可避免的会遇到一些问题，然后尝试去解决它。
