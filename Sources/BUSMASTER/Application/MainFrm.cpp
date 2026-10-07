@@ -475,6 +475,8 @@ CMainFrame::CMainFrame()
     GetCurrentDirectory(MAX_PATH, theApp.m_acApplicationDirectory);// Get application directory
     
     m_nMaxLinChannels = 1;
+    m_nNumChannels = 0;
+    m_nNumChannelsLIN = 0;
     m_podMsgSgWnd                   = nullptr;
     for (UINT i = 0; i < BUS_TOTAL; i++)
     {
@@ -8781,7 +8783,7 @@ void CMainFrame::vSetBaudRateInfo(ETYPE_BUS eBus)
 {
     if (CAN == eBus)
     {
-        if (nullptr != sg_pouFrameProcCAN)
+        if (nullptr != sg_pouFrameProcCAN && m_nNumChannels > 0)
         {
             // Update the baudrate info and the number of channels used
             sg_pouFrameProcCAN->FPC_SetChannelBaudRateDetails
@@ -8790,7 +8792,7 @@ void CMainFrame::vSetBaudRateInfo(ETYPE_BUS eBus)
     }
     else if (J1939 == eBus)
     {
-        if (nullptr != sg_pouIJ1939Logger)
+        if (nullptr != sg_pouIJ1939Logger && m_nNumChannels > 0)
         {
             // Update the baudrate info and the number of channels used
             sg_pouIJ1939Logger->FPJ1_SetChannelBaudRateDetails
@@ -8808,7 +8810,10 @@ void CMainFrame::vSetBaudRateInfo(ETYPE_BUS eBus)
 
                 int nCount = 0;
                 g_pouDIL_LIN_Interface->DILL_GetConfiguration(m_asControllerDetailsLIN, nCount);
-                sg_pouFrameProcLIN->FPL_SetChannelBaudRateDetails(m_asControllerDetailsLIN,nCount);
+                if (nCount > 0)
+                {
+                    sg_pouFrameProcLIN->FPL_SetChannelBaudRateDetails(m_asControllerDetailsLIN,nCount);
+                }
             }
         }
 

@@ -406,6 +406,14 @@ void CLogObjectCAN::Der_SetChannelBaudRateDetails
         delete[] m_pasControllerDetails;
     }
     m_pasControllerDetails = nullptr;
+    m_nNumChannels = 0;
+
+    // Startup can load a config with Logging ON before hardware selection;
+    // m_nNumChannels may still be 0/uninitialized (-1) then.
+    if (pTempControllerDetails == nullptr || nNumChannels <= 0)
+    {
+        return;
+    }
 
     m_pasControllerDetails = new SCONTROLLER_DETAILS [nNumChannels];
     for (int nIdx = 0; nIdx < nNumChannels; nIdx++)

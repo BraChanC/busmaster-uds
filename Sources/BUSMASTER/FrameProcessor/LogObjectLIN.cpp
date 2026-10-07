@@ -429,6 +429,12 @@ void CLogObjectLIN::Der_SetChannelBaudRateDetails(void* controllerDetails, int n
         delete[] m_pasControllerDetails;
     }
     m_pasControllerDetails = nullptr;
+    m_nNumChannels = 0;
+
+    if (pTempControllerDetails == nullptr || nNumChannels <= 0)
+    {
+        return;
+    }
 
     m_pasControllerDetails = new SCONTROLLER_DETAILS_LIN [nNumChannels];
     for (int nIdx = 0; nIdx < nNumChannels; nIdx++)

@@ -176,3 +176,30 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 - `Sources/BUSMASTER/UDS_Protocol/UDSMainWnd.*`
 - `Sources/BUSMASTER/UDS_Protocol/UDSWnd_Defines.h`
 - `Sources/BUSMASTER/Utility/RadixEdit.cpp`
+
+---
+
+## 10. 已修复：启动时加载开启 Logging 的配置崩溃
+
+**现象**
+
+- 一打开 BUSMASTER 即崩溃，提示保存 `BUSMASTER.dmp`。Message Window 可能已出现但尚未有报文。
+- Dump 异常码：`0xE06D7363`（C++ `AfxThrowMemoryException`）。
+
+**原因**
+
+- 配置（`.cfx`）中 `IsLoggingEnabled=TRUE`，启动时 `nLoadConfigFile` → `vStartStopLogging` → `Der_SetChannelBaudRateDetails`。
+- 此时尚未完成硬件选择，`CMainFrame::m_nNumChannels` **未初始化**（常为 `-1` / `0xFFFFFFFF`），`new SCONTROLLER_DETAILS[nNumChannels]` 申请非法大小导致内存异常。
+
+**修复要点**
+
+- 构造函数中将 `m_nNumChannels` / `m_nNumChannelsLIN` 初始化为 `0`。
+- `vSetBaudRateInfo` 在通道数 ≤0 时跳过 baud 写入。
+- `LogObjectCAN` / `J1939` / `LIN` 的 `Der_SetChannelBaudRateDetails` 对空指针或 `nNumChannels <= 0` 直接返回。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/Application/MainFrm.cpp`
+- `Sources/BUSMASTER/FrameProcessor/LogObjectCAN.cpp`
+- `Sources/BUSMASTER/FrameProcessor/LogObjectJ1939.cpp`
+- `Sources/BUSMASTER/FrameProcessor/LogObjectLIN.cpp`
