@@ -173,6 +173,11 @@ HRESULT CBaseImportLogFile::LoadFile(const std::string& strFileName)
             //AfxMessageBox(defSTR_ERR_IMPORTLOG_INVALID_FILE,MB_OK|MB_ICONSTOP);
             return eImportLogInvalid;
         }
+        else if(bResult == S_FALSE)
+        {
+            // ReadFile returns S_FALSE on cancel (protocol mismatch) or empty parse.
+            return m_bProtocolFound ? eImportLogInvalid : eImportLogProtocolMismatch;
+        }
     }
     return bResult;
 }

@@ -105,6 +105,12 @@ CMsgContainerBase::CMsgContainerBase()
 CMsgContainerBase::~CMsgContainerBase()
 {
     m_sDataCopyThread.bTerminateThread();
+    if (m_pouImportLogFile != nullptr)
+    {
+        m_pouImportLogFile->UnLoadFile();
+        delete m_pouImportLogFile;
+        m_pouImportLogFile = nullptr;
+    }
 }
 
 /******************************************************************************
@@ -228,7 +234,9 @@ HRESULT CMsgContainerBase::LoadLogFile(std::string strFileName)
     }
     if (nullptr == m_pouImportLogFile)
     {
-        return hResult;
+        // Previously returned S_FALSE (==1), which ProgressBar mapped to
+        // "Protocol Mismatch". Report a clear invalid/unavailable error instead.
+        return eImportLogInvalid;
     }
     hResult = m_pouImportLogFile->LoadFile(strFileName);
     if(hResult == S_OK)

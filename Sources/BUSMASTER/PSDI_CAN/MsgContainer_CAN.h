@@ -127,6 +127,7 @@ public:
     HRESULT EnableFilterApplied(BOOL bEnable);
     __int64 nCreateMapIndexKey( LPVOID pMsgData );
     //Import Log File.
+    virtual IImportLogFile* getLogFileImporter();
     HRESULT LoadPage(const unsigned long& nPageNo);
     HRESULT OverwritePage(const unsigned long& nLineNo);
     HRESULT SetIBMNetWorkGetService(void* pBmNetWork);

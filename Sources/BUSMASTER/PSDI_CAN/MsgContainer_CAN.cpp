@@ -33,6 +33,7 @@
 #include "NodeSimEx/BaseNodeSim.h"
 #include "NodeSimEx/NodeSimEx_extern.h"
 #include "MsgContainer_CAN.h"
+#include "ImportLogFileCAN.h"
 #include "../Application/HashDefines.h"
 #include "..\Utility\SortData.h"
 const int nBitsIn4Bytes          = 32;
@@ -942,9 +943,60 @@ void CMsgContainerCAN::GetMapIndexAtID(int nIndex,__int64& nMapIndex)
     m_ouOWCanBuf.nGetMapIndexAtID(nIndex,nMapIndex);
 }
 
-//Import Log File.
-HRESULT CMsgContainerCAN::LoadPage(const unsigned long& /*nPageNo*/)
+IImportLogFile* CMsgContainerCAN::getLogFileImporter()
 {
+    return new CImportLogFileCAN();
+}
+
+//Import Log File.
+HRESULT CMsgContainerCAN::LoadPage(const unsigned long& nPageNo)
+{
+    if (!m_bIsFileImported || m_pouImportLogFile == nullptr)
+    {
+        return S_FALSE;
+    }
+
+    m_ouOWCanBuf.vClearMessageBuffer();
+    m_ouAppendCanBuf.vClearMessageBuffer();
+    memset(&m_sCANReadDataSpl, 0, sizeof(m_sCANReadDataSpl));
+
+    m_pouImportLogFile->SetCurrentPage(nPageNo);
+    std::vector<void*> vecMsgs;
+    HRESULT hResult = m_pouImportLogFile->GetCurrListMsg(vecMsgs);
+    if (hResult != S_OK)
+    {
+        return hResult;
+    }
+
+    for (size_t nIdx = 0; nIdx < vecMsgs.size(); ++nIdx)
+    {
+        STCANDATA* pMsg = reinterpret_cast<STCANDATA*>(vecMsgs[nIdx]);
+        if (pMsg == nullptr)
+        {
+            continue;
+        }
+
+        // Same path as live traffic: fill append buffer and notify UI for
+        // every frame. Previously onRxMsg ran only once (last frame), so
+        // Overwrite mode showed a single row.
+        if (m_sCANReadDataSpl.m_lTickCount.QuadPart != 0)
+        {
+            m_sCANReadDataSpl.m_nDeltime = _abs64(pMsg->m_lTickCount.QuadPart -
+                                                  m_sCANReadDataSpl.m_lTickCount.QuadPart);
+        }
+        else
+        {
+            m_sCANReadDataSpl.m_nDeltime = 0;
+        }
+        STCANDATA* pStcan = &m_sCANReadDataSpl;
+        *pStcan = *pMsg;
+        m_ouAppendCanBuf.WriteIntoBuffer(&m_sCANReadDataSpl);
+        if (m_pRxMsgCallBack != nullptr)
+        {
+            m_pRxMsgCallBack->onRxMsg((void*)pMsg);
+        }
+        delete pMsg;
+    }
     return S_OK;
 }
 HRESULT CMsgContainerCAN::OverwritePage(const unsigned long& /*nLineNo*/)

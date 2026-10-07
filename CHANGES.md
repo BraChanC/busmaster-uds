@@ -203,3 +203,39 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 - `Sources/BUSMASTER/FrameProcessor/LogObjectCAN.cpp`
 - `Sources/BUSMASTER/FrameProcessor/LogObjectJ1939.cpp`
 - `Sources/BUSMASTER/FrameProcessor/LogObjectLIN.cpp`
+
+---
+
+## 11. 已修复：Message Window 可导入 CAN `.log`，并修正误报 Protocol Mismatch
+
+**现象**
+
+- Message Window 右键 **Import Log File** 原先一直灰掉，或导入后提示 `Unable to Load. Protocol Mismatch`。
+- 即使能打开，Overwrite 模式下可能只显示 1 条报文。
+
+**原因**
+
+1. 菜单被硬编码禁用；且 CAN 侧 `getLogFileImporter()` 返回空，`S_FALSE(1)` 被进度条映射成 Protocol Mismatch。
+2. 缺少 CAN 日志解析实现（`CImportLogFileCAN`）。
+3. `LoadPage` 只对最后一帧调用 `onRxMsg`，Overwrite 列表只剩一行。
+
+**修复要点**
+
+- 未连接总线时可启用 Import Log。
+- 实现 `ImportLogFileCAN`，解析 BUSMASTER CAN `.log`（`***PROTOCOL CAN***` 等）。
+- importer 为空时返回明确的 invalid，不再误报 Protocol Mismatch。
+- `LoadPage` 对每一帧写入 Append 缓冲并通知 UI。
+
+**用法**
+
+1. 断开 CAN 连接。
+2. Message Window 右键 → **Import Log File** → 选 `.log`。
+3. 查看全部历史帧请用 **Append**；Overwrite 下同一 ID 只保留最新一帧。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/PSDI_CAN/ImportLogFileCAN.*`
+- `Sources/BUSMASTER/PSDI_CAN/MsgContainer_CAN.*`
+- `Sources/BUSMASTER/CommonClass/MsgContainerBase.cpp`
+- `Sources/BUSMASTER/Utility/BaseImportLogFile.cpp`
+- `Sources/BUSMASTER/Application/MsgFrmtWnd.cpp`

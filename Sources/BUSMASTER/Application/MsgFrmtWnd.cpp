@@ -929,8 +929,15 @@ void CMsgFrmtWnd::OnParentNotify(UINT message, LPARAM lParam)
                 pomContextMenu->LoadMenu(IDM_MENU_MSG_OPRN);
                 pomSubMenu = pomContextMenu->GetSubMenu(0);
 
-                //1. Import log file menu
-                pomContextMenu->EnableMenuItem(IDM_MESSAGE_IMPORTLOGFILE, MF_DISABLED | MF_GRAYED);
+                //1. Import log file: only while disconnected (avoid mixing with live traffic)
+                if (bConnected == TRUE)
+                {
+                    pomContextMenu->EnableMenuItem(IDM_MESSAGE_IMPORTLOGFILE, MF_DISABLED | MF_GRAYED);
+                }
+                else
+                {
+                    pomContextMenu->EnableMenuItem(IDM_MESSAGE_IMPORTLOGFILE, MF_ENABLED);
+                }
 
                 //2. Message Expand menu
                 if (nIndex < 0)
