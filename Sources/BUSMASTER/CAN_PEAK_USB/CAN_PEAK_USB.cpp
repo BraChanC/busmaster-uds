@@ -393,6 +393,19 @@ static void BuildFdBitrate(unsigned int unNom, unsigned int unData, char* acOut,
               nom.nBrp, nom.nTseg1, nom.nTseg2, data.nBrp, data.nTseg1, data.nTseg2);
 }
 
+static int nPeakUsbChannel(TPCANHandle hCh)
+{
+    if (hCh >= PCAN_USBBUS1 && hCh <= PCAN_USBBUS8)
+    {
+        return (int)(hCh - PCAN_USBBUS1) + 1;
+    }
+    if (hCh >= PCAN_USBBUS9 && hCh <= PCAN_USBBUS16)
+    {
+        return (int)(hCh - PCAN_USBBUS9) + 9;
+    }
+    return 0;
+}
+
 static INT EnumeratePeakChannels(INTERFACE_HW_LIST& asList)
 {
     INT nFound = 0;
@@ -415,20 +428,33 @@ static INT EnumeratePeakChannels(INTERFACE_HW_LIST& asList)
         char acName[64] = {0};
         sg_CAN_GetValue(sg_UsbHandles[i], PCAN_HARDWARE_NAME, acName, sizeof(acName));
         DWORD dwDevId = 0;
-        if (sg_CAN_GetValue(sg_UsbHandles[i], PCAN_DEVICE_ID, &dwDevId, sizeof(dwDevId)) != PCAN_ERROR_OK || dwDevId == 0)
+        // 0 and 0xFFFFFFFF mean "device number not set" on a multi-channel PCAN.
+        if (sg_CAN_GetValue(sg_UsbHandles[i], PCAN_DEVICE_ID, &dwDevId, sizeof(dwDevId)) != PCAN_ERROR_OK
+            || dwDevId == 0 || dwDevId == 0xFFFFFFFFu)
         {
+            dwDevId = 0;
             sg_CAN_GetValue(sg_UsbHandles[i], PCAN_DEVICE_NUMBER, &dwDevId, sizeof(dwDevId));
+            if (dwDevId == 0 || dwDevId == 0xFFFFFFFFu)
+            {
+                dwDevId = 0;
+            }
         }
-        char acDesc[64] = {0};
-        if (dwDevId != 0)
+        int nCh = nPeakUsbChannel(sg_UsbHandles[i]);
+        char acDesc[96] = {0};
+        const char* pszHw = acName[0] ? acName : "PCAN-USB";
+        if (nCh > 0 && dwDevId != 0)
         {
-            sprintf_s(acDesc, "PCAN-USB Driver Id %u", dwDevId);
+            sprintf_s(acDesc, "%s CH%d (Id %u)", pszHw, nCh, dwDevId);
+        }
+        else if (nCh > 0)
+        {
+            sprintf_s(acDesc, "%s CH%d", pszHw, nCh);
         }
         else
         {
-            sprintf_s(acDesc, "PCAN USB 0x%X", sg_UsbHandles[i]);
+            sprintf_s(acDesc, "%s", pszHw);
         }
-        asList[nFound].m_dwIdInterface = (dwDevId != 0) ? dwDevId : sg_UsbHandles[i];
+        asList[nFound].m_dwIdInterface = (dwDevId != 0) ? dwDevId : (DWORD)(nCh > 0 ? nCh : sg_UsbHandles[i]);
         asList[nFound].m_dwVendor = sg_UsbHandles[i];
         asList[nFound].m_bytNetworkID = (unsigned char)nFound;
         asList[nFound].m_acNameInterface = acDesc;
@@ -707,7 +733,29 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_ListHwInterfaces(INTERFACE_HW_LIST& sSelHwInterfa
     }
 
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
-    int anSelList[CHANNEL_ALLOWED] = {0};
+    // -1 means "not selected". Zero would auto-fill Configured with channel index 0
+    // repeated for every slot (HardwareListingCAN stops only on -1).
+    int anSelList[CHANNEL_ALLOWED];
+    for (int i = 0; i < CHANNEL_ALLOWED; i++)
+    {
+        anSelList[i] = -1;
+    }
+    // Re-open: keep only previously selected channels in Configured (like official UI).
+    if (sg_nNoOfChannels > 0)
+    {
+        INT nRestored = 0;
+        for (INT i = 0; i < sg_nNoOfChannels && nRestored < CHANNEL_ALLOWED; i++)
+        {
+            for (INT j = 0; j < nFound; j++)
+            {
+                if ((TPCANHandle)asFound[j].m_dwVendor == sg_anHandles[i])
+                {
+                    anSelList[nRestored++] = j;
+                    break;
+                }
+            }
+        }
+    }
     CWnd objMainWnd;
     objMainWnd.Attach(sg_hOwnerWnd);
     IChangeRegisters* pAdvancedSettings = new CChangeRegisters(nullptr, InitData, nFound);

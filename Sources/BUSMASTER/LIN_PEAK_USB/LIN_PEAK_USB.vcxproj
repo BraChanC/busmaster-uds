@@ -135,7 +135,7 @@
       <SubSystem>Windows</SubSystem>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
       <DataExecutionPrevention />
-      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)CAN_PEAK_USB.lib</ImportLibrary>
+      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)LIN_PEAK_USB.lib</ImportLibrary>
       <TargetMachine>MachineX86</TargetMachine>
     </Link>
   </ItemDefinitionGroup>
@@ -163,7 +163,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
       <DataExecutionPrevention />
-      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)CAN_PEAK_USB.lib</ImportLibrary>
+      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)LIN_PEAK_USB.lib</ImportLibrary>
       <TargetMachine>MachineX86</TargetMachine>
       <IgnoreSpecificDefaultLibraries>daouuid.lib</IgnoreSpecificDefaultLibraries>
       <ProgramDatabaseFile>$(SolutionDir)/bin/DumpFiles/$(IntDir)/PDB/$(TargetName).pdb</ProgramDatabaseFile>

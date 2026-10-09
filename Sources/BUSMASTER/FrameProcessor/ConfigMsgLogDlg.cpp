@@ -27,6 +27,7 @@
 #include "Utility\MultiLanguageSupport.h"
 #include "Utility\UtilFunctions.h"
 #include "Utility\Utility.h"
+#include "ProjectConfiguration/ProjectConfiguration_extern.h"
 
 #define STR_FILTER_DIALOG_FORMAT        "Configure Filter for Log File: %s"
 #define BUSMASTER_LOG_REMOVE            "Do you want to remove selected log file entry?"
@@ -377,32 +378,79 @@ BOOL CConfigMsgLogDlg::FoundInLogList(CString omFullPath, CString omFileName)
     return Found;
 }
 
+static CString omLoadedConfigStem(void)
+{
+    CString omStem;
+    DATASTORAGEINFO sInfo;
+    memset(&sInfo, 0, sizeof(sInfo));
+    sInfo.m_Datastore = FILEMODE;
+    GetDatastorageConfig(&sInfo);
+    if (sInfo.FSInfo == nullptr || sInfo.FSInfo->m_FilePath[0] == '\0')
+    {
+        delete sInfo.FSInfo;
+        return omStem;
+    }
+
+    char acName[_MAX_FNAME] = {0};
+    _splitpath_s(sInfo.FSInfo->m_FilePath, nullptr, 0, nullptr, 0,
+                 acName, _MAX_FNAME, nullptr, 0);
+    delete sInfo.FSInfo;
+
+    if (acName[0] == '\0' || _stricmp(acName, "DefaultConfig") == 0)
+    {
+        return omStem;
+    }
+    for (char* pch = acName; *pch != '\0'; ++pch)
+    {
+        if (strchr("\\/:*?\"<>| ", *pch) != nullptr)
+        {
+            *pch = '_';
+        }
+    }
+    omStem = acName;
+    return omStem;
+}
+
 CString CConfigMsgLogDlg::GetUniqueLogFilePath(void)
 {
     CString omStrFullPath = "";
-    std::string acPathBuffer = {L'\0'};      // Get current working
-    char acFilePath[BM_MAX_PATH] = {L'\0'};      // Get current working
+    std::string acPathBuffer;
+    char acFilePath[BM_MAX_PATH] = {0};
     GetCurrentVerBusMasterUserDataPath(acPathBuffer);
 
-    BOOL bFound = TRUE; // Means - "found unique name"
+    // BUSMASTERLogFile_YYYYMMDDHHMMSS[_configName].log
+    CTime omNow = CTime::GetCurrentTime();
+    CString omTimeName;
+    omTimeName.Format("BUSMASTERLogFile_%04d%02d%02d%02d%02d%02d",
+                      omNow.GetYear(), omNow.GetMonth(), omNow.GetDay(),
+                      omNow.GetHour(), omNow.GetMinute(), omNow.GetSecond());
+    CString omConfig = omLoadedConfigStem();
+    if (omConfig.IsEmpty() == FALSE)
+    {
+        omTimeName += "_";
+        omTimeName += omConfig;
+    }
+
+    BOOL bFound = TRUE;
 
     for (USHORT Count = 0; bFound == TRUE; Count++)
     {
-        CString omNewLogFileName = "";  // New Log file name
-        auto baseName = GetDefaultLogFileName();
-        omNewLogFileName.Format("%s_%d.log", baseName.c_str(), Count);
+        CString omNewLogFileName;
+        if (Count == 0)
+        {
+            omNewLogFileName.Format("%s.log", omTimeName.GetString());
+        }
+        else
+        {
+            omNewLogFileName.Format("%s_%d.log", omTimeName.GetString(), Count);
+        }
         PathCombine(acFilePath, acPathBuffer.c_str(), omNewLogFileName.GetBuffer(MAX_PATH));
         omStrFullPath = acFilePath;
 
-
-        // We have two different strings to compare. The first one is the bare
-        // log file name and the second one is the full path.
-
-        // Iterate through the list of existing logging blocks. If the same
-        // file name has a hit, then try for another name.
-        bFound = FoundInLogList(omStrFullPath, omNewLogFileName);
+        // Skip a name already in the log list or already on disk.
+        bFound = FoundInLogList(omStrFullPath, omNewLogFileName) ||
+                 (PathFileExists(omStrFullPath) == TRUE);
     }
-    // At the end of this routine a unique log file should've been found.
     return omStrFullPath;
 }
 

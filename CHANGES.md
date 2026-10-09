@@ -121,13 +121,56 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 
 ---
 
-## 6. 编译
+## 6. 下载后编译
 
-- Visual Studio 2022/2026，Win32，**Debug** 或 Release。  
-- 解决方案：`Sources/BUSMASTER/BUSMASTER.sln`  
-- 常用目标：`UDS_Protocol`、`CAN_ZLG_USB`、`BUSMASTER`  
-- 链接报 **LNK1168**（无法写入 exe/dll）：先退出正在运行的 BUSMASTER。  
-- 改界面资源后必须编对应工程：Settings/Flash 在 `UDS_Protocol.dll`；Ribbon 图标在 `BUSMASTER.exe`。
+GitHub 的 zip / 克隆**不含**上次编译产物。按下面顺序编，主程序才能起来。
+
+### 环境
+
+- Visual Studio 2022 或 2026。工作负载选 **使用 C++ 的桌面开发**，在右侧安装详细信息里勾选 **MFC**（多字节支持已包含在 MFC 组件中）。
+- 平台 **Win32**。日常用 **Debug**。
+- `Sources/BUSMASTER/Directory.Build.targets` 会关掉已废弃的 `/Gm`，并给编译追加 `/FS`。这样多个 `cl.exe` 同时写同一个 PDB 时不会 C1041，也不会把编译器直接打退出。
+
+### 顺序
+
+1. **先编内核** `Sources/Kernel/BusmasterKernel.sln`，配置 **Debug | Win32**。压缩包里没有 `Utilities.lib`。生成后应能在 `Sources/Kernel/Bin/Debug/` 看到 `Utilities.lib` 和 `BusmasterDBNetwork.lib`。工程里输出目录和 Lib 路径写法不一致，日志里出现 **MSB8012** 时，只要这两个 lib 在该目录即可继续。
+2. **再编主解决方案** `Sources/BUSMASTER/BUSMASTER.sln`，同样 **Debug | Win32**。`CAN_PEAK_USB` 已在这个解决方案里，重新生成会带上 PCAN 驱动 DLL。
+3. **跳过 DBManager**。官方 3.0 起闭源，本仓库没有 `DBManager.sln`。详见 §8。
+4. 语言包、LDF Editor/Viewer、Format Converter 按需再编，不编也不影响主程序启动。
+
+改界面资源后要编对应工程：Settings / ECU Flash 在 `UDS_Protocol.dll`，Ribbon 图标在 `BUSMASTER.exe`。
+
+### 启动前放到 exe 旁边的文件
+
+运行 `Sources/BUSMASTER/BIN/Debug/BUSMASTER.exe`。若弹出 **Unable to Load Database Manager. Please Reinstall BUSMASTER**：
+
+| 文件 | 从哪来 |
+|------|--------|
+| `DBManager.dll` | 官方 3.x 安装目录，或本机已经能启动的 BUSMASTER 3.x 的 `BIN\Debug`。仓库不包含这个闭源 DLL。 |
+| `libxml2.dll` | 复制 `Sources/BUSMASTER/EXTERNAL/libxml2/bin/libxml2.dll` 到 exe 同一目录。 |
+
+`DBManager.dll` 还依赖 VC2013 运行库 `MSVCR120.dll`、`MSVCP120.dll`。64 位系统上它们一般在 `C:\Windows\SysWOW64`，32 位程序可以直接加载。
+
+换过 `CAN_PEAK_USB.dll` 或 `FrameProcessor.dll` 之后，先退出正在运行的 BUSMASTER 再启动，否则进程里仍是旧 DLL。
+
+### 可以失败、且不影响主程序的驱动工程
+
+- **CAN_IXXAT_VCI**：要装 IXXAT VCI SDK，并有环境变量 `VciSDKDir`，否则找不到 `vcinpl.h`。不用这块卡可以不编它。
+- **Kvaser**：需要厂商的 `canlib32.lib`，放到 `Sources/BUSMASTER/BIN/Libs/Debug/`。仓库不含该库。
+- **MHS**：`mhsbmcfg.lib` 由解决方案里的 MHS 配置工程生成。链接报找不到时，先单独生成该工程，再编 CAN_MHS。
+
+这些失败只是少了对应硬件 DLL，已经编出来的 `BUSMASTER.exe` 仍可运行。默认驱动是 STUB，实车时在 Driver Selection 里改选 PEAK 或 ZLG。
+
+### 重新生成时
+
+「重新生成解决方案」是当前配置的全量编译，工程之间仍然并行。`/FS` 解决的是 PDB 被几个编译器同时写。各工程是按**路径**去链 `DataTypes.lib`、`Utils.lib`，不是项目引用。基础库还在重写时，其它工程会成片报 **LNK1104**（打不开 `DataTypes.lib` 或 `Utils.lib`）。后面那一串失败都是这个库还没落盘，不是几十个源文件各自写错。
+
+处理：
+
+1. 先单独生成 **DataTypes**、**Utils**（需要的话再加上 CommonClass、Filter、ProjectConfiguration）。
+2. 再生成解决方案。库已经在磁盘上时，第二次通常就能过。
+3. **LNK1168**（无法写入 exe/dll）：先退出正在运行的 BUSMASTER。
+4. 清单不要再指到 `BIN/Release/BUSMASTER.exe.manifest`。源文件在 `Application/res/BUSMASTER.exe.manifest`，见 §12。
 
 ---
 
@@ -239,3 +282,102 @@ CAN 分类在 Diagnostics 旁增加 **ECU Flash**。图标使用条带中未占�
 - `Sources/BUSMASTER/CommonClass/MsgContainerBase.cpp`
 - `Sources/BUSMASTER/Utility/BaseImportLogFile.cpp`
 - `Sources/BUSMASTER/Application/MsgFrmtWnd.cpp`
+
+---
+
+## 12. 已修复：干净检出无法编译（清单路径、导入库重名）
+
+**现象**
+
+- 编 `BUSMASTER` 时报 **RC2135**：`BUSMASTER.rc` 找不到 `..\BIN\Release\BUSMASTER.exe.manifest`。GitHub 压缩包里没有 Release 产物。
+- 并行链接时报 **LNK1104**，打不开 `CAN_Vector_XL.exp`（或同名 `.lib`）。
+
+**原因**
+
+- 清单被写死在上一次 Release 的输出目录。
+- `LIN_ETAS_BOA` 的 ImportLibrary 写成了 `CAN_Vector_XL.lib`，和 CAN Vector 工程抢同一个导出库。`LIN_PEAK_USB` 有同样问题，写成了 `CAN_PEAK_USB.lib`。`CAN_NSI` 有一处写成了 `CAN_Kvaser_CAN.lib`。
+- 运行时 `LoadLibrary` 用的是各自 DLL 的输出文件名，所以已经编出来的 PCAN 抓包仍然正常。错误只在重新链接、两个工程同时写同一个 `.lib` / `.exp` 时出现。
+
+**修复**
+
+- 清单源文件改为 `Application/res/BUSMASTER.exe.manifest`，`BUSMASTER.rc` 和 `BUSMASTER.vcxproj` 都指向它。
+- 导入库改回本工程名字：`LIN_ETAS_BOA.lib`、`LIN_PEAK_USB.lib`、`CAN_NSI.lib`。
+- `CAN_NSI` 不在 `BUSMASTER.sln` 里，避免以后单独编时再撞库名。
+
+---
+
+## 13. 已修复：PCAN Hardware Selection 把未选通道填进 Configured
+
+**现象**
+
+- 打开 Hardware Selection 时，Available 里有通道，Configured 却已经被占满。官方行为是：**还没选的时候 Configured 为空**，用 `>>` 只加入选中的通道。
+
+**原因**
+
+- `anSelList` 被初始化成 `{0}`。对话框把 `0` 当成“已选中的列表下标”，并且只在遇到 `-1` 时停止，于是每个槽位都看成通道 0。
+
+**修复**
+
+- 全部初始化为 `-1`。
+- 再次打开对话框时，只把当前已经选过的 PCAN 句柄填回 Configured。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/CAN_PEAK_USB/CAN_PEAK_USB.cpp`
+- `Sources/BUSMASTER/BUSMASTER.sln`（把 `CAN_PEAK_USB` 加入解决方案，重新生成时会编这个 DLL）
+
+---
+
+## 14. 已修复：PCAN 通道显示成 Driver Id 4294967295
+
+**现象**
+
+- Available 里两行都是 `PCAN-USB Driver Id 4294967295`，分不出 CH1 和 CH2。Driver ID 显示 `-1`。固件名（例如 PCAN-USB Pro FD）两边相同。
+
+**原因**
+
+- 设备没有设置 Device ID 时，PCAN 返回 `0` 或 `0xFFFFFFFF`。旧代码用无符号数打印，就变成 `4294967295`。
+
+**修复**
+
+- 通道号从句柄计算：`PCAN_USBBUS1`–`USBBUS8`、`USBBUS9`–`USBBUS16`。
+- 名称显示为 `PCAN-USB CH1`、`PCAN-USB CH2`。只有读到有效 Device ID（不是 0，也不是 `0xFFFFFFFF`）时才附加 `(Id n)`。
+- 列表里的接口号在没有设备 ID 时用通道号。连接仍使用原来的 PCAN 句柄。
+
+改过 `CAN_PEAK_USB.dll` 后要退出并重新打开 BUSMASTER，才能看到新名称。
+
+---
+
+## 15. 已修复：Logging 点 Add 总是复用 BUSMASTERLogFile_0.log
+
+**现象**
+
+- Logging 里点 **Add**，每次都落到同一个 `BUSMASTERLogFile_0.log`。
+
+**修复**
+
+目录不变，仍是原来的日志目录。文件名按当前时间和已加载的配置生成：
+
+| 情况 | 文件名 |
+|------|--------|
+| 已加载配置，例如 `0C6N02TA.cfx` | `BUSMASTERLogFile_YYYYMMDDHHMMSS_0C6N02TA.log` |
+| 没有加载配置，或用的是默认空配置 `DefaultConfig` | `BUSMASTERLogFile_YYYYMMDDHHMMSS.log` |
+
+同一秒再点 Add，或这个名字已经在日志列表里、或磁盘上已有同名文件，则追加 `_1`、`_2`。
+
+不改写日志的 Append / Overwrite，也不自动给日志绑定过滤器。过滤器仍在 Logging 关闭时，于 Configure → Filters 里指定。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/FrameProcessor/ConfigMsgLogDlg.cpp`
+- `Sources/BUSMASTER/FrameProcessor/FrameProcessor.vcxproj`（链接 `ProjectConfiguration.lib`，用来读取当前 cfx 路径）
+
+---
+
+## 16. 编译器：关闭 `/Gm`，打开 `/FS`
+
+VS 2026 的编译器对 `/Gm`（Minimal Rebuild）给出 **D9035**。并行「重新生成」时，多个 `cl.exe` 写同一个 PDB，会出现 **C1041**，或者编译器异常退出，接着基础库编失败，其它工程成片 **LNK1104**。
+
+`Sources/BUSMASTER/Directory.Build.targets` 对 BUSMASTER 下的工程关掉 Minimal Rebuild，并追加 `/FS`，让 PDB 可以共享。
+
+这不改变「重新生成 = 当前配置全量编译」。基础库仍按路径链接，所以 DataTypes / Utils 还在生成时，其它工程仍可能暂时 LNK1104。处理办法见 §6。

@@ -127,7 +127,7 @@ del "%25TMP%25\canlib32.lib"
       <SubSystem>Windows</SubSystem>
       <RandomizedBaseAddress>false</RandomizedBaseAddress>
       <DataExecutionPrevention />
-      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)CAN_Kvaser_CAN.lib</ImportLibrary>
+      <ImportLibrary>$(SolutionDir)/BIN/Libs/$(OutDir)CAN_NSI.lib</ImportLibrary>
       <TargetMachine>MachineX86</TargetMachine>
       <ProgramDatabaseFile>$(SolutionDir)/bin/DumpFiles/$(IntDir)/PDB/$(TargetName).pdb</ProgramDatabaseFile>
       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>

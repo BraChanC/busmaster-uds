@@ -1452,7 +1452,7 @@ END
 // RT_MANIFEST
 //
 
-1                       RT_MANIFEST             "..\\BIN\\Release\\BUSMASTER.exe.manifest"
+1                       RT_MANIFEST             "res\\BUSMASTER.exe.manifest"
 
 /////////////////////////////////////////////////////////////////////////////
 //

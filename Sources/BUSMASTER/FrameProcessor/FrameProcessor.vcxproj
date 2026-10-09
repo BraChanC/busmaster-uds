@@ -110,7 +110,7 @@
     </ResourceCompile>
     <Link>
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib"
-"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)Filter.lib"
+"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)Filter.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)ProjectConfiguration.lib"
  %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(SolutionDir)/bin/$(OutDir)FrameProcessor.dll</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -153,7 +153,7 @@
     <Link>
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)DataTypes.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib"
-"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)Filter.lib"
+"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)Filter.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)ProjectConfiguration.lib"
  %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(SolutionDir)/bin/$(OutDir)FrameProcessor.dll</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -200,7 +200,7 @@
 "$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)DIL_Interface.lib"
   
-"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib"
+"$(SolutionDir)/BIN/Libs/$(OutDir)CommonClass.lib" "$(SolutionDir)/BIN/Libs/$(OutDir)ProjectConfiguration.lib"
  %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(SolutionDir)/bin/$(OutDir)FrameProcessor.dll</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>

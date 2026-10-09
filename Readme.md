@@ -8,6 +8,9 @@ NeoBusmaster（UDS / ECU Flash 增强）
 - 监控 CAN 报文时打开 Diagnostic 会崩溃（PCAN 等驱动下复现）——见 [CHANGES.md §9](CHANGES.md#9-已修复监控报文时打开-diagnostic-崩溃)
 - 启动时加载开启 Logging 的配置崩溃——见 [CHANGES.md §10](CHANGES.md#10-已修复启动时加载开启-logging-的配置崩溃)
 - Message Window 导入 CAN `.log`（含误报 Protocol Mismatch）——见 [CHANGES.md §11](CHANGES.md#11-已修复message-window-可导入-can-log并修正误报-protocol-mismatch)
+- 下载后编译：清单路径、导入库重名、`/Gm` 与 `/FS`——见 [CHANGES.md §6](CHANGES.md#6-下载后编译)、[§12](CHANGES.md#12-已修复干净检出无法编译清单路径与导入库重名)
+- PCAN 未选通道被填进 Configured，以及通道名显示成 4294967295——见 [CHANGES.md §13](CHANGES.md#13-已修复pcan-hardware-selection-把未选通道填进-configured)、[§14](CHANGES.md#14-已修复pcan-通道显示成-driver-id-4294967295)
+- Logging 点 Add 不再复用 `BUSMASTERLogFile_0.log`——见 [CHANGES.md §15](CHANGES.md#15-已修复logging-点-add-总是复用-busmasterlogfile_0log)
 
 这是从 https://github.com/rbei-etas/busmaster.git 延续的工程。本分支在诊断、ECU 刷写和周立功 CANFD 上有本地增强。
 

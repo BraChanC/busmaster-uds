@@ -1176,7 +1176,7 @@ copy ".\Res\Splsh16.bmp" "$(SolutionDir)\bin\$(OutDir)Splsh16.bmp"
     <Image Include="Res\ShowRibbon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <Manifest Include="..\BIN\Release\BUSMASTER.exe.manifest">
+    <Manifest Include="Res\BUSMASTER.exe.manifest">
       <SubType>Designer</SubType>
     </Manifest>
   </ItemGroup>
