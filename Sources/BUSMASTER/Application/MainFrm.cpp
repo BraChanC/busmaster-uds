@@ -5979,7 +5979,20 @@ void CMainFrame::OnFileConnect()
 				busStatus.mEventType = eBUSEVENT::ON_PRE_CONNECT;
 				mPluginManager->notifyPlugins(eBusmaster_Event::Bus_Status, &busStatus);
 
-				if (g_pouDIL_CAN_Interface->DILC_StartHardware() == S_OK)
+				HRESULT hStartHardware = S_FALSE;
+				for (int nStartTry = 0; nStartTry < 6; nStartTry++)
+				{
+					hStartHardware = g_pouDIL_CAN_Interface->DILC_StartHardware();
+					if (hStartHardware == S_OK)
+					{
+						break;
+					}
+					if (nStartTry + 1 < 6)
+					{
+						Sleep(200);
+					}
+				}
+				if (hStartHardware == S_OK)
                 {
                     ouWaitIndicator.SetWindowText(_("Connected... "));
 					busStatus.mBus = ETYPE_BUS::CAN;
