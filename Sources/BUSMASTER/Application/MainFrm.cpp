@@ -1687,6 +1687,20 @@ void CMainFrame::OnConfigLinChannel()
 void CMainFrame::OnConfigChannelSelection()
 {
     INT nCount = CHANNEL_ALLOWED;
+    INT nPrevCount = m_nNumChannels;
+    if (nPrevCount < 0)
+    {
+        nPrevCount = 0;
+    }
+    if (nPrevCount > (INT)CHANNEL_ALLOWED)
+    {
+        nPrevCount = CHANNEL_ALLOWED;
+    }
+    INTERFACE_HW_LIST asPrevHw;
+    for (int i = 0; i < nPrevCount; i++)
+    {
+        asPrevHw[i] = m_asINTERFACE_HW[i];
+    }
     HRESULT hResult = S_FALSE;
 
     /* Deselect hardware interfaces if selected */
@@ -1716,8 +1730,16 @@ void CMainFrame::OnConfigChannelSelection()
     }
     else
     {
-        /* Select previously available channels */
-        g_pouDIL_CAN_Interface->DILC_SelectHwInterfaces(m_asINTERFACE_HW, nCount);
+        /* Closing the dialog leaves nCount at CHANNEL_ALLOWED. Selecting that
+           many entries pulls in empty slots and the next Connect fails. */
+        for (int i = 0; i < nPrevCount; i++)
+        {
+            m_asINTERFACE_HW[i] = asPrevHw[i];
+        }
+        if (nPrevCount > 0)
+        {
+            g_pouDIL_CAN_Interface->DILC_SelectHwInterfaces(m_asINTERFACE_HW, nPrevCount);
+        }
     }
 }
 
