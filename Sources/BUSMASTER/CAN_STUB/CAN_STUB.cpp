@@ -85,6 +85,7 @@ static CRITICAL_SECTION sg_CSBroker;
 static bool             sg_bBrokerCsInit    = false;
 static HRESULT          sg_hResult          = S_FALSE;
 static HANDLE           sg_hNotifyFinish    = nullptr;
+static LONG             sg_nBrokerStarted   = 0;
 static STCAN_MSG*       sg_pouCanTxMsg      = nullptr;
 static SYSTEMTIME       sg_CurrSysTime      = {'\0'};
 static LARGE_INTEGER    sg_QueryTickCount;
@@ -469,12 +470,11 @@ HRESULT PerformAnOperation(BYTE bActionCode)
         return hResult;
     }
 
-    static LONG s_nBrokerStarted = 0;
-    if (InterlockedCompareExchange(&s_nBrokerStarted, 1, 0) == 0)
+    if (InterlockedCompareExchange(&sg_nBrokerStarted, 1, 0) == 0)
     {
         if (sg_sBrokerObjBusEmulation.bStartThread(BrokerThreadBusEmulation) == FALSE)
         {
-            InterlockedExchange(&s_nBrokerStarted, 0);
+            InterlockedExchange(&sg_nBrokerStarted, 0);
             return hResult;
         }
     }
@@ -1009,6 +1009,39 @@ HRESULT CDIL_CAN_STUB::CAN_GetErrorCount(SERROR_CNT& sErrorCnt, UINT /* nChannel
     return S_OK;
 }
 
+static void vBindLocalSimulationServer(void)
+{
+    char exePath[MAX_PATH];
+    DWORD got = GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    if (got == 0 || got >= MAX_PATH)
+    {
+        return;
+    }
+    char* slash = strrchr(exePath, '\\');
+    if (slash == nullptr)
+    {
+        return;
+    }
+    if (strcpy_s(slash + 1, MAX_PATH - (size_t)(slash + 1 - exePath), "BusEmulation.exe") != 0)
+    {
+        return;
+    }
+    if (GetFileAttributesA(exePath) == INVALID_FILE_ATTRIBUTES)
+    {
+        return;
+    }
+    char quoted[MAX_PATH + 3];
+    sprintf_s(quoted, "\"%s\"", exePath);
+    HKEY key = nullptr;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER,
+                        "Software\\Classes\\CLSID\\{5983045C-CA05-47CF-8CD8-86A4445FB48C}\\LocalServer32",
+                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS)
+    {
+        RegSetValueExA(key, nullptr, 0, REG_SZ, (const BYTE*)quoted, (DWORD)(strlen(quoted) + 1));
+        RegCloseKey(key);
+    }
+}
+
 DWORD WINAPI BrokerThreadBusEmulation(LPVOID pVoid)
 {
     CPARAM_THREADPROC* pThreadParam = (CPARAM_THREADPROC*) pVoid;
@@ -1019,12 +1052,19 @@ DWORD WINAPI BrokerThreadBusEmulation(LPVOID pVoid)
 
     // Get hold of the bus simulation and error logger interfaces
     HRESULT hResult = CoInitialize(nullptr);
+    vBindLocalSimulationServer();
 
     ISimENG* pISimENG = nullptr;
     hResult = CoCreateInstance(CLSID_SimENG, nullptr, CLSCTX_LOCAL_SERVER,
                                IID_ISimENG, (LPVOID*) &pISimENG);
     if ((S_OK != hResult) || (nullptr == pISimENG))
     {
+        sg_hResult = hResult;
+        if (sg_hNotifyFinish != nullptr)
+        {
+            SetEvent(sg_hNotifyFinish);
+        }
+        InterlockedExchange(&sg_nBrokerStarted, 0);
         if (pThreadParam != nullptr)
         {
             SetEvent(pThreadParam->hGetExitNotifyEvent());

@@ -146,6 +146,7 @@ public:
         m_acNameInterface = "";
         m_acDescription = "";
         m_acDeviceName = "";
+        m_acAdditionalInfo = "";
     }
     INTERFACE_HW(const INTERFACE_HW& objRef)
     {
@@ -155,6 +156,7 @@ public:
         m_acNameInterface = objRef.m_acNameInterface;
         m_acDescription = objRef.m_acDescription;
         m_acDeviceName = objRef.m_acDeviceName;
+        m_acAdditionalInfo = objRef.m_acAdditionalInfo;
     }
     INTERFACE_HW& operator=(INTERFACE_HW& objRef)
     {
@@ -164,6 +166,7 @@ public:
         m_acNameInterface = objRef.m_acNameInterface;
         m_acDescription = objRef.m_acDescription;
         m_acDeviceName = objRef.m_acDeviceName;
+        m_acAdditionalInfo = objRef.m_acAdditionalInfo;
         return *this;
     }
 } ;

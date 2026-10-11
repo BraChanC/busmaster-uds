@@ -1499,6 +1499,10 @@ static int nAddChanneltoHWInterfaceList(int narrNetwordID[], int nCntNtwIDs, int
 
         std::stringstream acTempStr;
         acTempStr << "SN: " << std::dec << ulSerialNumber << ", ";
+        if (ulSerialNumber != 0)
+        {
+            sg_HardwareIntr[nChannels].m_acAdditionalInfo = std::to_string(ulSerialNumber);
+        }
         acTempStr << "Port ID: " << sg_HardwareIntr[nChannels].m_dwIdInterface << "-CAN" << std::dec << narrNetwordID[i];
         sg_HardwareIntr[nChannels].m_acDescription = acTempStr.str();
 

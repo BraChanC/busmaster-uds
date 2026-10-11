@@ -206,6 +206,9 @@ public:
     /**
     *This function is called to send the flow control because it has been received a long response  */
     void CUDSMainWnd::PrepareFlowControl(void);
+    void CUDSMainWnd::ShowResponseBytes(const BYTE* data, int got, int total, BOOL done);
+    void CUDSMainWnd::SetResponseService(const CString& text);
+    void CUDSMainWnd::ApplyCanFdSwitch();
 
 
     CWnd* pomGetTxMsgViewPointers() const;
@@ -243,6 +246,7 @@ public:
     afx_msg void OnBnClickedHexDownload();
     afx_msg void OnBnClickedLogSave();
     afx_msg void OnBnClickedLogClear();
+    afx_msg void OnCanFdSwitch();
     afx_msg void OnBnClickedCyclic();
 
     void PopulateIso14229Tree();

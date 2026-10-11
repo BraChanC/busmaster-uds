@@ -712,6 +712,31 @@ static INT EnumerateZlgChannels(INTERFACE_HW_LIST& asList, int nModel)
         asList[nFound].m_acNameInterface = acName;
         asList[nFound].m_acDescription = acName;
         asList[nFound].m_acDeviceName = sg_asUsbTypes[nModel].pcName;
+        char acSn[21];
+        memcpy(acSn, sInf.str_Serial_Num, 20);
+        acSn[20] = '\0';
+        for (int nSn = 0; nSn < 20; nSn++)
+        {
+            unsigned char ucSn = (unsigned char)acSn[nSn];
+            if (ucSn < 32 || ucSn > 126)
+            {
+                acSn[nSn] = '\0';
+                break;
+            }
+        }
+        while (acSn[0] == ' ')
+        {
+            memmove(acSn, acSn + 1, strlen(acSn));
+        }
+        size_t nSnLen = strlen(acSn);
+        while (nSnLen > 0 && acSn[nSnLen - 1] == ' ')
+        {
+            acSn[--nSnLen] = '\0';
+        }
+        if (acSn[0] != '\0')
+        {
+            asList[nFound].m_acAdditionalInfo = acSn;
+        }
         nFound++;
     }
     return nFound;

@@ -1180,6 +1180,7 @@ BEGIN
         BEGIN
             MENUITEM "&Main Window",                IDM_UDS
             MENUITEM "&Settings",                   IDD_SETTINGS_UDS
+            MENUITEM "Diagnostic &Server",          IDM_UDS_SERVER
             MENUITEM "ECU &Flash",                  IDM_UDS_FLASH
         END
     END
@@ -1981,6 +1982,7 @@ BEGIN
     IDM_UDS                 "Configure Diagnostic messages for Transmission and Reception\nTransmit Window"
     IDD_SETTINGS_UDS        "Configure settings for Diagnostic Message Transmission and Reception\nSettings"
     IDM_UDS_FLASH           "ECU flash sequence editor\nECU Flash"
+    IDM_UDS_SERVER          "Configure diagnostic server responses\nDiagnostic Server"
 END
 
 #endif    // English (United States) resources

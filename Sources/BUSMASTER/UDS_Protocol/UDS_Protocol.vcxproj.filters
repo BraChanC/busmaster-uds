@@ -30,6 +30,9 @@
     <ClCompile Include="UDSMainWnd.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UDSServer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UDSSettingsWnd.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -57,6 +60,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UDSMainWnd.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UDSServer.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UDSSettingsWnd.h">

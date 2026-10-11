@@ -381,3 +381,45 @@ VS 2026 的编译器对 `/Gm`（Minimal Rebuild）给出 **D9035**。并行「�
 `Sources/BUSMASTER/Directory.Build.targets` 对 BUSMASTER 下的工程关掉 Minimal Rebuild，并追加 `/FS`，让 PDB 可以共享。
 
 这不改变「重新生成 = 当前配置全量编译」。基础库仍按路径链接，所以 DataTypes / Utils 还在生成时，其它工程仍可能暂时 LNK1104。处理办法见 §6。
+
+---
+
+## 17. 诊断服务端，以及诊断窗口上的 CAN FD 开关
+
+**诊断服务端**
+
+Diagnostics 菜单和 Ribbon 上增加 **Diagnostic Server**。在这个窗口里配置 ECU 要回答的请求：匹配方式、SID、数据。数据可以是十六进制，也可以是文件路径。
+
+- 普通 CAN 下，Add / Update 的数据超过 **4095** 字节会被拒绝。经典 ISO-TP 首帧长度是 12 位，整段响应最长 4095。
+- 文件在后台解析。解析完成前 Add / Update 是灰的。超过 16 MB 不加载。
+- 打开窗口时不会自动读 `UdsServer.cfg`。加载过或保存过之后，Save 写回那个文件。
+
+**CAN FD 开关**
+
+不另开窗口。Main Diagnostic Window 上有 **CAN FD** 复选框：
+
+| 状态 | 行为 |
+|------|------|
+| 勾选 | ISO-TP 按 CAN FD 发送，DLC 为 64。长度不超过 4095 仍用 12 位首帧；更长用扩展首帧 |
+| 不勾选 | 走普通 CAN |
+| 已选通道都没有打开 CAN FD | 开关灰色，不能勾选 |
+
+服务端发送跟随这个开关。勾选 CAN FD 时，上面的 4095 字节限制不再拦截 Add / Update，16 MB 上限仍在。
+
+诊断对象默认请求 `7E0`、响应 `7E8`。Settings 对话框里 11 位地址的初始值仍是请求 `700`、响应 `708`。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/UDS_Protocol/UDSServer.cpp`、`UDSServer.h`、`uds.rc`、`resource.h`
+- `Sources/BUSMASTER/UDS_Protocol/UDS_Protocol.cpp`、`UDSMainWnd.cpp`、`UDSMainWnd.h`、`UDS_Extern.h`、`UDS_Resource.h`
+- `Sources/BUSMASTER/Application/MainFrm.cpp`、`MainFrm.h`、`BUSMASTER.rc`、`Resource.h`
+- `Sources/BUSMASTER/Application/Res/ribbon1.mfcribbon-ms`
+
+---
+
+## 18. 通道序列号、仿真注册、J1939 Activate
+
+- 连接后，Trace 里会带上通道描述和序列号。PCAN、ZLG、neoVI 把序列号放进通道附加信息。
+- 仿真驱动把 `BusEmulation.exe` 登记到当前用户的 `LocalServer32`。`BusEmulation` 改为 `AsInvoker` 链接，避免每次都要管理员权限才能注册。
+- J1939 Activate 不再无限等待一个无法派送消息的工作线程，界面不会因此停住。
+- Flow Control 长度按编辑框里的数字取值，限制在 3 到 8。

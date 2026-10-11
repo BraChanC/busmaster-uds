@@ -144,10 +144,21 @@ DWORD WINAPI ReadDILCANMsg(LPVOID pVoid)
         CReadCanMsg* pCurrObj = (CReadCanMsg*) pThreadParam->m_pBuffer;
         if (pCurrObj != nullptr)
         {
-            pThreadParam->m_unActionCode = INVOKE_FUNCTION; // Set default action
-            // Create the action event. In this case this will be used solely for
-            // thread exit procedure. The first entry will be used.
-            pThreadParam->m_hActionEvent = pCurrObj->m_ahActionEvent[0];
+            // Do not overwrite INACTION / EXIT. Activate calls
+            // bTransitToInaction before this thread is scheduled; replacing
+            // that code with INVOKE_FUNCTION drops the handshake and the UI
+            // thread waits forever.
+            if (pThreadParam->m_unActionCode != INACTION &&
+                    pThreadParam->m_unActionCode != EXIT_THREAD)
+            {
+                pThreadParam->m_unActionCode = INVOKE_FUNCTION;
+            }
+            // Exit / inaction is signalled on the first event. vDoInit assigns
+            // it before CreateThread so a signal cannot be lost on a null handle.
+            if (pThreadParam->m_hActionEvent == nullptr)
+            {
+                pThreadParam->m_hActionEvent = pCurrObj->m_ahActionEvent[0];
+            }
 
             DWORD dwWaitRet;
             BYTE byHIndex;
@@ -238,6 +249,15 @@ void CReadCanMsg::vRetrieveDataFromBuffer(BYTE byIndex)
 void CReadCanMsg::vDoInit(void)
 {
     m_ouThreadUtil.m_pBuffer = (LPVOID) this;
+    // Assign before CreateThread. Sleep(0) in bStartThread returns at once
+    // when the new thread is not ready yet, and Activate then signals this
+    // event. A null handle makes that SetEvent a no-op and the UI wait never ends.
+    m_ouThreadUtil.m_hActionEvent = m_ahActionEvent[0];
+    if (m_ouThreadUtil.m_unActionCode != INACTION &&
+            m_ouThreadUtil.m_unActionCode != EXIT_THREAD)
+    {
+        m_ouThreadUtil.m_unActionCode = INVOKE_FUNCTION;
+    }
     BOOL Result = m_ouThreadUtil.bStartThread(ReadDILCANMsg);
     ASSERT(Result);
 }

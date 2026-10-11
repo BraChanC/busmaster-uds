@@ -298,6 +298,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWndEx)
     ON_COMMAND(IDM_UDS,OnCfgnUdsMainWnd)
     ON_COMMAND(IDD_SETTINGS_UDS,OnCfgnUdsSettingsWnd)
     ON_COMMAND(IDM_UDS_FLASH,OnCfgnUdsFlashWnd)
+    ON_COMMAND(IDM_UDS_SERVER,OnCfgnUdsServerWnd)
     ON_WM_SHOWWINDOW()
     ON_WM_DESTROY()
     ON_UPDATE_COMMAND_UI(ID_FILE_NEW, OnUpdateFileNew)
@@ -477,6 +478,8 @@ CMainFrame::CMainFrame()
     m_nMaxLinChannels = 1;
     m_nNumChannels = 0;
     m_nNumChannelsLIN = 0;
+    m_nCanHwTrace = 0;
+    m_nLinHwTrace = 0;
     m_podMsgSgWnd                   = nullptr;
     for (UINT i = 0; i < BUS_TOTAL; i++)
     {
@@ -1713,6 +1716,8 @@ void CMainFrame::OnConfigChannelSelection()
         {
             /* Updates the number of channels selected */
             m_nNumChannels = nCount;
+            vRememberHardware(FALSE, nCount);
+            vSyncUdsCanFdHardware();
 
             //Update hardware info in status bar
             vUpdateHWStatusInfo();
@@ -1740,6 +1745,7 @@ void CMainFrame::OnConfigChannelSelection()
         {
             g_pouDIL_CAN_Interface->DILC_SelectHwInterfaces(m_asINTERFACE_HW, nPrevCount);
         }
+        vRememberHardware(FALSE, nPrevCount);
     }
 }
 
@@ -5800,6 +5806,155 @@ void CMainFrame::vUpdateGraphData(STCANDATA& sCanData)
 /*                     disconnected toggles. Msg is posted to msg window to   */
 /*                      reset handler flags.                                  */
 /******************************************************************************/
+void CMainFrame::vRememberHardware(BOOL bLin, int nCount)
+{
+    if (nCount < 0)
+    {
+        nCount = 0;
+    }
+    if (nCount > (int)defNO_OF_CHANNELS)
+    {
+        nCount = (int)defNO_OF_CHANNELS;
+    }
+    INTERFACE_HW* asHw = bLin ? m_asLinHwTrace : m_asCanHwTrace;
+    for (int i = 0; i < nCount; i++)
+    {
+        asHw[i] = m_asINTERFACE_HW[i];
+    }
+    if (bLin)
+    {
+        m_nLinHwTrace = nCount;
+    }
+    else
+    {
+        m_nCanHwTrace = nCount;
+    }
+}
+
+static void vPostHardwareTrace(const CString& omText)
+{
+    static char asSlot[4][2048];
+    static int nSlot = 0;
+    char* pszSlot = asSlot[nSlot & 3];
+    nSlot++;
+    strncpy_s(pszSlot, 2048, omText, _TRUNCATE);
+    theApp.bWriteIntoTraceWnd(pszSlot);
+}
+
+static void vAppendChannelTrace(CString& omLine, const INTERFACE_HW& hw, const CString& omBaud, const CString& omData)
+{
+    CString omWho;
+    if (!hw.m_acDescription.empty())
+    {
+        omWho = hw.m_acDescription.c_str();
+    }
+    else if (!hw.m_acDeviceName.empty())
+    {
+        omWho = hw.m_acDeviceName.c_str();
+    }
+    else if (!hw.m_acNameInterface.empty())
+    {
+        omWho = hw.m_acNameInterface.c_str();
+    }
+    else
+    {
+        omWho.Format("CH%u", (unsigned)hw.m_bytNetworkID);
+    }
+    CString omSn = hw.m_acAdditionalInfo.c_str();
+    omSn.Trim();
+    if (!omSn.IsEmpty() && omWho.Find("SN") < 0)
+    {
+        omWho += " SN ";
+        omWho += omSn;
+    }
+    CString omPiece = omWho;
+    if (!omBaud.IsEmpty())
+    {
+        omPiece += " baud ";
+        omPiece += omBaud;
+    }
+    if (!omData.IsEmpty())
+    {
+        omPiece += " ";
+        omPiece += omData;
+    }
+    if (omLine.IsEmpty())
+    {
+        omLine = omPiece;
+        return;
+    }
+    if (omLine.Find(omPiece) >= 0)
+    {
+        return;
+    }
+    omLine += "; ";
+    omLine += omPiece;
+}
+
+void CMainFrame::vWriteHardwareTrace(BOOL bLin, BOOL bConnected)
+{
+    int nCount = bLin ? m_nLinHwTrace : m_nCanHwTrace;
+    INTERFACE_HW* asHw = bLin ? m_asLinHwTrace : m_asCanHwTrace;
+    CString omTime = CTime::GetCurrentTime().Format("%Y-%m-%d %H:%M:%S");
+    CString omAction = bConnected ? "Connected" : "Disconnected";
+    CString omBody;
+    for (int i = 0; i < nCount; i++)
+    {
+        CString omBaud;
+        CString omData;
+        if (!bLin)
+        {
+            omBaud = m_asControllerDetails[i].m_omStrBaudrate.c_str();
+            omBaud.Trim();
+            if (m_asControllerDetails[i].m_bcanFDEnabled && m_asControllerDetails[i].m_unDataBitRate > 0)
+            {
+                omData.Format("data baud %u", m_asControllerDetails[i].m_unDataBitRate);
+            }
+        }
+        else
+        {
+            int nBaud = 0;
+            if (m_ouBusmasterNetwork != nullptr)
+            {
+                ChannelSettings ouSettings;
+                m_ouBusmasterNetwork->GetChannelSettings(LIN, i, &ouSettings);
+                nBaud = ouSettings.m_ouLINSettings.m_nBaudRate;
+            }
+            if (nBaud <= 0 && i < (int)defNO_OF_LIN_CHANNELS)
+            {
+                nBaud = (int)m_asControllerDetailsLIN[i].m_BaudRate;
+            }
+            if (nBaud > 0)
+            {
+                omBaud.Format("%d", nBaud);
+            }
+        }
+        vAppendChannelTrace(omBody, asHw[i], omBaud, omData);
+    }
+    if (omBody.IsEmpty())
+    {
+        if (bLin)
+        {
+            for (int i = 0; i < m_nDILCountLin; i++)
+            {
+                if (m_shLINDriverId == (SHORT)m_ouListLin[i].m_dwDriverID)
+                {
+                    omBody = m_ouListLin[i].m_acName.c_str();
+                    omBody.Replace("&", "");
+                    break;
+                }
+            }
+        }
+        else
+        {
+            omBody = vGetControllerName(m_dwDriverId);
+        }
+    }
+    CString omLine;
+    omLine.Format("%s %s %s", (LPCTSTR)omTime, (LPCTSTR)omAction, (LPCTSTR)omBody);
+    vPostHardwareTrace(omLine);
+}
+
 void CMainFrame::OnFileConnect()
 {
     CFlags* pouFlags = nullptr;
@@ -5999,6 +6154,7 @@ void CMainFrame::OnFileConnect()
 					busStatus.mEventType = eBUSEVENT::ON_CONNECT;
 					mPluginManager->notifyPlugins(eBusmaster_Event::Bus_Status, &busStatus);
                     bReturn = true;
+                    vWriteHardwareTrace(FALSE, TRUE);
                 }
                 else
                 {
@@ -6019,6 +6175,7 @@ void CMainFrame::OnFileConnect()
 				busStatus.mEventType = eBUSEVENT::ON_DISCONNECT;
 				mPluginManager->notifyPlugins(eBusmaster_Event::Bus_Status, &busStatus);
                 bReturn = true;
+                vWriteHardwareTrace(FALSE, FALSE);
             }
         }
 
@@ -6263,6 +6420,7 @@ void CMainFrame::OnLINConnect()
             GetILINNodeSim()->NS_DLLUnloadAllEnabled();
             return;
         }
+        vWriteHardwareTrace(TRUE, TRUE);
 
         BOOL bLogIsON = FALSE;
         CFlags* pFlagLog = theApp.pouGetFlagsPtr();
@@ -6329,6 +6487,10 @@ void CMainFrame::OnLINConnect()
 
         g_pouDIL_LIN_Interface->DILL_ResetSlaveRespData();
         hResult = g_pouDIL_LIN_Interface->DILL_StopHardware();
+        if (hResult == S_OK)
+        {
+            vWriteHardwareTrace(TRUE, FALSE);
+        }
         m_objTxHandler.vBusStatusChanged(LIN, BUS_DISCONNECTED);
         //m_objLINTxHandler.vStopTransmission(0);
         if (nullptr != m_podMsgWndThread)
@@ -7763,6 +7925,31 @@ void CMainFrame::OnUpdateTraceWnd(CCmdUI* pCmdUI)
 typedef HRESULT (*DIL_UDS_SHOWWND)(HWND hParent);
 static DIL_UDS_SHOWWND pfUDS_ShowWnd;
 
+static BOOL bCanFdHardwareSelected(const SCONTROLLER_DETAILS* details, int count)
+{
+    if (details == NULL || count <= 0)
+    {
+        return FALSE;
+    }
+    if (count > (int)defNO_OF_CHANNELS)
+    {
+        count = (int)defNO_OF_CHANNELS;
+    }
+    for (int i = 0; i < count; i++)
+    {
+        if (details[i].m_bcanFDEnabled)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+void CMainFrame::vSyncUdsCanFdHardware()
+{
+    DIL_UDS_SetCanFdAvailable(bCanFdHardwareSelected(m_asControllerDetails, m_nNumChannels));
+}
+
 void CMainFrame::OnCfgnUdsMainWnd()
 {
     /*if((ptrDILI_UDS_Protocol = GetIUDSDIL())!= NULL){
@@ -7774,6 +7961,7 @@ void CMainFrame::OnCfgnUdsMainWnd()
     //pfUDS_ShowWnd(m_hWnd);
     LPARAM lParam;
     GetICANDIL()->DILC_GetControllerParams(lParam, 0, NUMBER_HW);
+    vSyncUdsCanFdHardware();
     HRESULT Temp = DIL_UDS_ShowWnd(this->m_hWnd,lParam);
 }
 /*******************************************************************************
@@ -7794,6 +7982,11 @@ void CMainFrame::OnCfgnUdsSettingsWnd()
 void CMainFrame::OnCfgnUdsFlashWnd()
 {
     DIL_UDS_ShowFlashWnd(this->m_hWnd);
+}
+
+void CMainFrame::OnCfgnUdsServerWnd()
+{
+    DIL_UDS_ShowServerWnd(this->m_hWnd);
 }
 /******************************************************************************/
 /*  Function Name    :  OnUpdateConfigureBaudrate                             */
@@ -9590,6 +9783,8 @@ HRESULT CMainFrame::IntializeDIL(UINT unDefaultChannelCnt, bool bLoadedFromXml)
 
                         /* Updates the number of channels selected */
                         m_nNumChannels = nCount;
+                        vRememberHardware(FALSE, nCount);
+                        vSyncUdsCanFdHardware();
 
                         /*Update hardware info in status bar*/
                         vUpdateHWStatusInfo();
@@ -9708,6 +9903,7 @@ HRESULT CMainFrame::IntializeDILL(UINT unDefaultChannelCnt)
 
                         /* Updates the number of channels selected */
                         m_nNumChannelsLIN = nCount;
+                        vRememberHardware(TRUE, nCount);
 
                         /*Update hardware info in status bar*/
                         vUpdateHWStatusInfo();
@@ -16247,6 +16443,7 @@ void CMainFrame::OnConfigChannelSelectionLIN()
         {
             /* Updates the number of channels selected */
             m_nNumChannels = nCount;
+            vRememberHardware(TRUE, nCount);
 
             //Update hardware info in status bar
             vUpdateHWStatusInfo();

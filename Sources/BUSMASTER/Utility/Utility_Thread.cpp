@@ -144,18 +144,24 @@ BOOL CPARAM_THREADPROC::bTransitToInaction(void)
     BOOL bResult = FALSE;
 
     /* The intention is to bring the thread into a state of inaction. One way
-    of achieving this is to signal the thread to wait for an indefinite period
-    of time until the owner decides the retransition of the same. */
+    of achieving this is to signal the thread to wait until the owner decides
+    the retransition of the same. WaitForSingleObject(INFINITE) does not
+    dispatch sent messages, so a worker blocked in SendMessage back to this
+    thread deadlocks the UI (J1939 Activate). */
     if ((nullptr != m_hThread2Owner) && (nullptr != m_hOwner2Thread)
-            && (nullptr != m_hThread))
+            && (nullptr != m_hThread) && (nullptr != m_hActionEvent))
     {
         m_unPrevActionCode = m_unActionCode;
         m_unActionCode = INACTION; // New instruction
-        SetEvent(m_hActionEvent);  // The thread should get released from wait
-        Sleep(0);
-        WaitForSingleObject(m_hThread2Owner, INFINITE); /* Now wait until the
-        thread signals that it is going to handle 'INACTION' switch case. */
-        bResult = TRUE;
+        for (int nTry = 0; nTry < 50 && bResult == FALSE; nTry++)
+        {
+            SetEvent(m_hActionEvent);
+            DWORD dwWait = MsgWaitForMultipleObjects(1, &m_hThread2Owner, FALSE, 100, QS_SENDMESSAGE);
+            if (dwWait == WAIT_OBJECT_0)
+            {
+                bResult = TRUE;
+            }
+        }
     }
 
     return bResult;
@@ -187,11 +193,15 @@ BOOL CPARAM_THREADPROC::bTransitToActiveState(void)
     {
         m_unActionCode = m_unPrevActionCode; /* Resume whatever the thread
         was doing prior to transiting into inaction. */
-        SetEvent(m_hOwner2Thread);  // The thread should get released from wait
-        Sleep(0);
-        WaitForSingleObject(m_hThread2Owner, INFINITE); /* Now wait until the
-        thread signals that it is going to come out of 'INACTION' switch case.*/
-        bResult = TRUE;
+        for (int nTry = 0; nTry < 50 && bResult == FALSE; nTry++)
+        {
+            SetEvent(m_hOwner2Thread);  // The thread should get released from wait
+            DWORD dwWait = MsgWaitForMultipleObjects(1, &m_hThread2Owner, FALSE, 100, QS_SENDMESSAGE);
+            if (dwWait == WAIT_OBJECT_0)
+            {
+                bResult = TRUE;
+            }
+        }
     }
 
     return bResult;

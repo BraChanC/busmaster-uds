@@ -13,6 +13,7 @@
 #include "UDS_NegRespMng.h"
 #include "UDSSettingsWnd.h"
 #include "UDSFlashWnd.h"
+#include "UDSServer.h"
 #include "UDS_Protocol.h"
 #include "CANDriverDefines.h"
 
@@ -62,7 +63,10 @@ CString Bytes_to_Show= ("\r\n   1-> ");
 float TotalFrames;
 
 /** it corresponds to the exact ID of the message received    */
-int respID = 0x708;
+int respID = 0x7E8;
+BOOL g_udsCanFd = FALSE;
+BOOL g_udsCanFdHw = FALSE;
+int g_udsFdDlc = 64;
 
 /** It Corresponds to the value put in the settingWnd if it's extended   */
 int RespMsgID;
@@ -94,8 +98,8 @@ CUDS_Protocol::CUDS_Protocol()
     SourceAddress =0;
     TargetAddress =0;
     fInterface = INTERFACE_NORMAL_11;
-    MsgID = 0x700;
-    TargetAddress = 0x708;
+    MsgID = 0x7E0;
+    TargetAddress = 0x7E8;
     numberOfBytes = 1;
     Data_Recibida = "";
     Current_Channel=1 ;
@@ -163,7 +167,23 @@ USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels)
     }
 
     omMainWnd->ShowWindow(SW_SHOW);
+    omMainWnd->SetWindowText("Main Diagnostic Window");
+    omMainWnd->ApplyCanFdSwitch();
     return 0;
+}
+
+USAGEMODE void DIL_UDS_SetCanFdAvailable(BOOL available)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    g_udsCanFdHw = available ? TRUE : FALSE;
+    if (!g_udsCanFdHw)
+    {
+        g_udsCanFd = FALSE;
+    }
+    if (omMainWnd != NULL && ::IsWindow(omMainWnd->GetSafeHwnd()))
+    {
+        omMainWnd->ApplyCanFdSwitch();
+    }
 }
 
 USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent)
@@ -183,6 +203,12 @@ USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent)
     omFlashWnd->ShowWindow(SW_SHOW);
     omFlashWnd->SetForegroundWindow();
     return 0;
+}
+
+USAGEMODE HRESULT DIL_UDS_ShowServerWnd(HWND hParent)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    return UdsServer_Show(hParent);
 }
 /**********************************************************************************************************
  Function Name  :   UpdateChannelUDS
@@ -278,11 +304,227 @@ void CUDS_Protocol::Show_ResponseData(unsigned char psMsg[], unsigned char Datal
  Date Created   :   19.06.2013
 **********************************************************************************************************/
 
+struct UdsRxNode
+{
+    STCAN_MSG msg;
+    UdsRxNode* next;
+};
+
+static CRITICAL_SECTION g_udsRxCs;
+static volatile LONG g_udsRxInit = 0;
+static UdsRxNode* g_udsRxHead = NULL;
+static UdsRxNode* g_udsRxTail = NULL;
+static volatile LONG g_udsRxWake = 0;
+
+static BYTE* g_longBuf = NULL;
+static int g_longCap = 0;
+static int g_longGot = 0;
+static int g_longTotal = 0;
+static int g_longPub = 0;
+
+static void EnsureUdsRxCs()
+{
+    if (g_udsRxInit == 2)
+    {
+        return;
+    }
+    if (InterlockedCompareExchange(&g_udsRxInit, 1, 0) == 0)
+    {
+        InitializeCriticalSection(&g_udsRxCs);
+        g_udsRxInit = 2;
+    }
+    else
+    {
+        while (g_udsRxInit != 2)
+        {
+            Sleep(0);
+        }
+    }
+}
+
+static void WakeUdsRx()
+{
+    CUDSMainWnd* wnd = omMainWnd;
+    if (wnd == NULL || !::IsWindow(wnd->GetSafeHwnd()))
+    {
+        return;
+    }
+    wnd->PostMessage(WM_UDS_EVALUATE_MSG, 1, 0);
+}
+
+void UdsEnqueueRx(const STCAN_MSG& msg)
+{
+    EnsureUdsRxCs();
+    UdsRxNode* node = new UdsRxNode;
+    node->msg = msg;
+    node->next = NULL;
+    EnterCriticalSection(&g_udsRxCs);
+    BOOL wasEmpty = (g_udsRxHead == NULL);
+    if (g_udsRxTail != NULL)
+    {
+        g_udsRxTail->next = node;
+    }
+    else
+    {
+        g_udsRxHead = node;
+    }
+    g_udsRxTail = node;
+    LeaveCriticalSection(&g_udsRxCs);
+    if (wasEmpty && InterlockedCompareExchange(&g_udsRxWake, 1, 0) == 0)
+    {
+        WakeUdsRx();
+    }
+}
+
+static BOOL PopUdsRx(STCAN_MSG& msg)
+{
+    EnsureUdsRxCs();
+    EnterCriticalSection(&g_udsRxCs);
+    UdsRxNode* node = g_udsRxHead;
+    if (node != NULL)
+    {
+        g_udsRxHead = node->next;
+        if (g_udsRxHead == NULL)
+        {
+            g_udsRxTail = NULL;
+        }
+    }
+    LeaveCriticalSection(&g_udsRxCs);
+    if (node == NULL)
+    {
+        return FALSE;
+    }
+    msg = node->msg;
+    delete node;
+    return TRUE;
+}
+
+void UdsDrainRx()
+{
+    for (int n = 0; n < 256; n++)
+    {
+        STCAN_MSG msg;
+        if (!PopUdsRx(msg))
+        {
+            break;
+        }
+        EvaluateMessage(msg);
+    }
+    EnsureUdsRxCs();
+    EnterCriticalSection(&g_udsRxCs);
+    BOOL more = (g_udsRxHead != NULL);
+    LeaveCriticalSection(&g_udsRxCs);
+    if (more)
+    {
+        WakeUdsRx();
+        return;
+    }
+    InterlockedExchange(&g_udsRxWake, 0);
+    EnterCriticalSection(&g_udsRxCs);
+    more = (g_udsRxHead != NULL);
+    LeaveCriticalSection(&g_udsRxCs);
+    if (more && InterlockedCompareExchange(&g_udsRxWake, 1, 0) == 0)
+    {
+        WakeUdsRx();
+    }
+}
+
+void UdsFlushRx()
+{
+    if (g_udsRxInit != 2)
+    {
+        return;
+    }
+    EnterCriticalSection(&g_udsRxCs);
+    UdsRxNode* node = g_udsRxHead;
+    g_udsRxHead = NULL;
+    g_udsRxTail = NULL;
+    LeaveCriticalSection(&g_udsRxCs);
+    while (node != NULL)
+    {
+        UdsRxNode* next = node->next;
+        delete node;
+        node = next;
+    }
+    InterlockedExchange(&g_udsRxWake, 0);
+}
+
+static void BeginLongResponse(int total)
+{
+    if (total < 1)
+    {
+        total = 1;
+    }
+    if (total > 16 * 1024 * 1024)
+    {
+        total = 16 * 1024 * 1024;
+    }
+    if (g_longCap < total)
+    {
+        delete[] g_longBuf;
+        g_longBuf = new BYTE[total];
+        g_longCap = (g_longBuf != NULL) ? total : 0;
+    }
+    g_longGot = 0;
+    g_longTotal = total;
+    g_longPub = 0;
+}
+
+static void AppendLongResponse(const BYTE* data, int n)
+{
+    if (g_longBuf == NULL || data == NULL || n <= 0 || g_longGot >= g_longTotal)
+    {
+        return;
+    }
+    if (g_longGot + n > g_longTotal)
+    {
+        n = g_longTotal - g_longGot;
+    }
+    memcpy(g_longBuf + g_longGot, data, n);
+    g_longGot += n;
+}
+
+static void PublishLongResponse(BOOL done)
+{
+    if (omMainWnd == NULL || !::IsWindow(omMainWnd->GetSafeHwnd()))
+    {
+        return;
+    }
+    if (!done && g_longTotal > 4096 && g_longPub != 0 && (g_longGot - g_longPub) < 16384)
+    {
+        return;
+    }
+    g_longPub = g_longGot;
+    omMainWnd->ShowResponseBytes(g_longBuf, g_longGot, g_longTotal, done);
+    if (done && omManagerPtr != NULL)
+    {
+        CString hex;
+        int n = g_longGot;
+        if (n > 64)
+        {
+            n = 64;
+        }
+        for (int i = 0; i < n; i++)
+        {
+            CString one;
+            one.Format("%02X ", g_longBuf[i]);
+            hex += one;
+        }
+        omManagerPtr->Data_Recibida = hex;
+        omManagerPtr->numberOfBytes = g_longGot;
+    }
+}
+
 USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
 {
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
     CUDSMainWnd* pMainWnd = omMainWnd;
-    if (pMainWnd == NULL || !::IsWindow(pMainWnd->GetSafeHwnd()))
+    BOOL bClientUi = (pMainWnd != NULL && ::IsWindow(pMainWnd->GetSafeHwnd()));
+    if (!bClientUi || GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL) == GetCurrentThreadId())
+    {
+        UdsServer_OnCan(Mensaje);
+    }
+    if (!bClientUi)
     {
         return 0;
     }
@@ -290,12 +532,7 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
     DWORD dwUiTid = GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL);
     if (dwUiTid != GetCurrentThreadId())
     {
-        STCAN_MSG* pCopy = new STCAN_MSG;
-        *pCopy = Mensaje;
-        if (!pMainWnd->PostMessage(WM_UDS_EVALUATE_MSG, 0, (LPARAM)pCopy))
-        {
-            delete pCopy;
-        }
+        UdsEnqueueRx(Mensaje);
         return 0;
     }
 
@@ -365,15 +602,52 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
         {
 
             int TempValue = strtol(CurrentService, NULL, 16);
-            if( psMsg[initialByte+2] == TempValue+0x40)     // Evaluate it only if it corresponds to my request
+            int ffData = 6 - aux_Finterface;
+            int sidPos = initialByte + 2;
+            /* ISO 15765-2 FF with a 32-bit length: 10 00 + 4 length bytes + data. */
+            if (psMsg[initialByte] == 0x10 && psMsg[initialByte + 1] == 0x00
+                    && Datalen >= (unsigned char)(initialByte + 7))
+            {
+                unsigned int len32 = ((unsigned int)psMsg[initialByte + 2] << 24)
+                                     | ((unsigned int)psMsg[initialByte + 3] << 16)
+                                     | ((unsigned int)psMsg[initialByte + 4] << 8)
+                                     | (unsigned int)psMsg[initialByte + 5];
+                Length_Received = (float)len32;
+                ffData = (int)Datalen - 6 - aux_Finterface;
+                if (ffData < 1)
+                {
+                    ffData = 1;
+                }
+                sidPos = initialByte + 6;
+            }
+            else
+            {
+                Length_Received = (float)(((psMsg[initialByte] & 0x0F) << 8) | psMsg[initialByte + 1]);
+                ffData = (Datalen > 8) ? ((int)Datalen - 2 - aux_Finterface) : (6 - aux_Finterface);
+            }
+            if (sidPos < Datalen && psMsg[sidPos] == (unsigned char)(TempValue + 0x40))
             {
                 omManagerPtr->numberOfBytes =1;
-                Length_Received = Length_Received + psMsg[initialByte+1];        // The length of the receivedMessage
+                int cfSize = (Datalen > 8) ? ((int)Datalen - 1 - aux_Finterface) : (7 - aux_Finterface);
+                if (cfSize < 1)
+                {
+                    cfSize = 1;
+                }
+                int remain = (int)Length_Received - ffData;
+                if (remain < 0)
+                {
+                    remain = 0;
+                }
+                TotalFrames = (float)remain / (float)cfSize;
+                LengthLastFrame = remain % cfSize;
+                BeginLongResponse((int)Length_Received);
+                if (Datalen > sidPos)
+                {
+                    AppendLongResponse(psMsg + sidPos, Datalen - sidPos);
+                }
                 omMainWnd->PrepareFlowControl();
-                omManagerPtr->Show_ResponseData(psMsg ,Datalen,initialByte+1);
-                TotalFrames = (Length_Received - 6+ aux_Finterface )/ (7-aux_Finterface);           // This variable is used to determinate how much continuos frames will be received
-                LengthLastFrame = ((int)Length_Received - 6+ aux_Finterface )%(7-aux_Finterface);
-                omMainWnd->m_omDiagService = NegRespManager->evaluateResp(psMsg ,initialByte+1);
+                PublishLongResponse(FALSE);
+                omMainWnd->SetResponseService(NegRespManager->evaluateResp(psMsg , sidPos - 1));
                 omMainWnd->m_omSendButton.EnableWindow(FALSE);
                 m_nTimer = omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time /*TIME_UNABLE_SEND_BUTTON*/, NULL);
             }
@@ -383,8 +657,11 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
         {
             Counter_BSize--;
             TotalFrames--;
-            omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
-            omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time , NULL);               //ReStart Timer
+            if (((int)g_longGot & 31) == 0 || TotalFrames <= 0)
+            {
+                omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
+                omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time , NULL);
+            }
 
             if(TotalFrames==0)                       //It enters here when the last frame has exactly 7/6 bytes of data
             {
@@ -400,7 +677,11 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
                 omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
                 omMainWnd->m_omSendButton.EnableWindow(TRUE);
             }
-            omManagerPtr->Show_ResponseData(psMsg ,Datalen, initialByte); // now show the response
+            if (Datalen > (unsigned char)(initialByte + 1))
+            {
+                AppendLongResponse(psMsg + initialByte + 1, Datalen - (initialByte + 1));
+            }
+            PublishLongResponse(TotalFrames <= 0);
             if (TotalFrames <= 0 && omMainWnd != NULL)
             {
                 omMainWnd->TryAutoSendSecurityKeyFromResponse();
@@ -415,10 +696,18 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
         {
             omManagerPtr->numberOfBytes =1;
             FSending = FALSE;                 //Show this message and then Stop showing the bytes
-            omMainWnd->m_omDiagService = NegRespManager->evaluateResp(psMsg , initialByte);         // Show the description of the Response
+            int sfPci = initialByte;
+            int sfLen = psMsg[initialByte];
+            if (Datalen > 8 && psMsg[initialByte] == 0x00)
+            {
+                sfPci = initialByte + 1;
+                sfLen = psMsg[initialByte + 1];
+                Length_Received = (float)sfLen;
+            }
+            omMainWnd->m_omDiagService = NegRespManager->evaluateResp(psMsg , sfPci);         // Show the description of the Response
             if(!FDontShow)
             {
-                Length_Received, omManagerPtr->Show_ResponseData(psMsg ,psMsg[initialByte]+initialByte+1, initialByte);    // If it's a simple response the legth  will be in psMsg[initialByte]
+                Length_Received, omManagerPtr->Show_ResponseData(psMsg ,(unsigned char)(sfLen + sfPci + 1), sfPci);
                 if (omMainWnd != NULL)
                 {
                     omMainWnd->TryAutoSendSecurityKeyFromResponse();
@@ -427,7 +716,14 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
             FDontShow = FALSE;                // The nextFramme can be shown
 
         }
-        omMainWnd->m_omBytes.vSetValue(Length_Received);
+        if (TypeofFrame == LONG_RESPONSE || (TypeofFrame == CONSECUTIVE_FRAME && TotalFrames <= 0))
+        {
+            omMainWnd->m_omBytes.vSetValue(g_longTotal);
+        }
+        else if (TypeofFrame != CONSECUTIVE_FRAME)
+        {
+            omMainWnd->m_omBytes.vSetValue(Length_Received);
+        }
     }
     return 0;
 }

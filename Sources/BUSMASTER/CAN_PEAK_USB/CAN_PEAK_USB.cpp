@@ -462,6 +462,12 @@ static INT EnumeratePeakChannels(INTERFACE_HW_LIST& asList)
         char acFw[64] = {0};
         sg_CAN_GetValue(sg_UsbHandles[i], PCAN_CHANNEL_VERSION, acFw, sizeof(acFw));
         asList[nFound].m_acDeviceName = acFw[0] ? acFw : (acName[0] ? acName : "PCAN-USB");
+        if (dwDevId != 0)
+        {
+            char acSn[32];
+            sprintf_s(acSn, "%u", dwDevId);
+            asList[nFound].m_acAdditionalInfo = acSn;
+        }
         nFound++;
         if (nFound >= (INT)defCHANNEL_CAN_MAX)
         {

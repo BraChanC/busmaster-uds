@@ -11,6 +11,7 @@ NeoBusmaster（UDS / ECU Flash 增强）
 - 下载后编译：清单路径、导入库重名、`/Gm` 与 `/FS`——见 [CHANGES.md §6](CHANGES.md#6-下载后编译)、[§12](CHANGES.md#12-已修复干净检出无法编译清单路径与导入库重名)
 - PCAN 未选通道被填进 Configured，以及通道名显示成 4294967295——见 [CHANGES.md §13](CHANGES.md#13-已修复pcan-hardware-selection-把未选通道填进-configured)、[§14](CHANGES.md#14-已修复pcan-通道显示成-driver-id-4294967295)
 - Logging 点 Add 不再复用 `BUSMASTERLogFile_0.log`——见 [CHANGES.md §15](CHANGES.md#15-已修复logging-点-add-总是复用-busmasterlogfile_0log)
+- 诊断服务端，以及诊断窗口上的 CAN FD 开关——见 [CHANGES.md §17](CHANGES.md#17-诊断服务端以及诊断窗口上的-can-fd-开关)
 
 这是从 https://github.com/rbei-etas/busmaster.git 延续的工程。本分支在诊断、ECU 刷写和周立功 CANFD 上有本地增强。
 

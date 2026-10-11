@@ -188,6 +188,7 @@
     <ClCompile Include="UDS_TimmingWnd.cpp" />
     <ClCompile Include="UDSFlashWnd.cpp" />
     <ClCompile Include="UDSMainWnd.cpp" />
+    <ClCompile Include="UDSServer.cpp" />
     <ClCompile Include="UDSSettingsWnd.cpp" />
     <ClCompile Include="VectorSeedKey.cpp" />
   </ItemGroup>
@@ -202,6 +203,7 @@
     <ClInclude Include="UDSFlashWnd.h" />
     <ClInclude Include="UDSIso14229.h" />
     <ClInclude Include="UDSMainWnd.h" />
+    <ClInclude Include="UDSServer.h" />
     <ClInclude Include="UDSSettingsWnd.h" />
     <ClInclude Include="UDSWnd_Defines.h" />
     <ClInclude Include="VectorSeedKey.h" />

@@ -108,6 +108,7 @@ BEGIN_MESSAGE_MAP(CUDSMainWnd, CDialog)
     ON_BN_CLICKED ( IDC_BTN_HEX_DOWNLOAD, OnBnClickedHexDownload )
     ON_BN_CLICKED ( IDC_BTN_LOG_SAVE, OnBnClickedLogSave )
     ON_BN_CLICKED ( IDC_BTN_LOG_CLEAR, OnBnClickedLogClear )
+    ON_BN_CLICKED ( IDC_CHECK_UDS_CANFD, OnCanFdSwitch )
     ON_NOTIFY(TVN_SELCHANGED, IDC_TREE_SERVICES, OnTvnSelchangedServices)
     ON_CBN_SELCHANGE(IDC_COMBO_SEC_TARGET, OnCbnSelchangeSecTarget)
     ON_EN_UPDATE ( IDC_EDIT_DATA, OnEnChangeData )
@@ -163,8 +164,82 @@ UINT CUDSMainWnd::StartTimer(/*LPVOID alo*/)
  Date Created   :   28.05.2013
 **********************************************************************************************************/
 
+extern BOOL g_udsCanFd;
+extern BOOL g_udsCanFdHw;
+extern int g_udsFdDlc;
+
+static int UdsTxDlc()
+{
+    if (!g_udsCanFd)
+    {
+        return 8;
+    }
+    if (g_udsFdDlc < 8)
+    {
+        return 8;
+    }
+    if (g_udsFdDlc > 64)
+    {
+        return 64;
+    }
+    return g_udsFdDlc;
+}
+
 int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mPSTXSELMSGDATA psTxCanMsgUds, UDS_INTERFACE FInterface)
 {
+    if (g_udsCanFd)
+    {
+        int dlc = UdsTxDlc();
+        int aux = aux_Finterface;
+        int ffData;
+        int pci;
+        memset(abByteArr, 0, 64);
+        if (aux > 0)
+        {
+            abByteArr[0] = (BYTE)TargetAddress;
+        }
+        if (TotalLength > 0xFFF)
+        {
+            abByteArr[aux] = 0x10;
+            abByteArr[aux + 1] = 0x00;
+            abByteArr[aux + 2] = (BYTE)((TotalLength >> 24) & 0xFF);
+            abByteArr[aux + 3] = (BYTE)((TotalLength >> 16) & 0xFF);
+            abByteArr[aux + 4] = (BYTE)((TotalLength >> 8) & 0xFF);
+            abByteArr[aux + 5] = (BYTE)(TotalLength & 0xFF);
+            pci = 6;
+            ffData = dlc - 6 - aux;
+        }
+        else
+        {
+            abByteArr[aux] = (BYTE)(0x10 | ((TotalLength >> 8) & 0x0F));
+            abByteArr[aux + 1] = (BYTE)(TotalLength & 0xFF);
+            pci = 2;
+            ffData = dlc - 2 - aux;
+        }
+        if (ffData < 1)
+        {
+            ffData = 1;
+        }
+        if (ffData > (int)TotalLength)
+        {
+            ffData = (int)TotalLength;
+        }
+        for (int n = 0; n < ffData; n++)
+        {
+            CString one = omByteStr.Mid(n * 2, 2);
+            abByteArr[aux + pci + n] = (BYTE)_tcstol(one, NULL, 16);
+        }
+        psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
+        psTxCanMsgUds->m_psTxMsg->m_bCANFD = true;
+        SendSimpleDiagnosticMessage();
+        int takenChars = ffData * 2;
+        omByteStr = omByteStr.Right(((UINT)TotalLength * 2) - takenChars);
+        DatatoSend = omByteStr;
+        TotalLength = (((UINT)TotalLength * 2) - takenChars) / 2;
+        FWaitFlow = TRUE;
+        ConsecutiveFrame = 0x21;
+        return 0;
+    }
     bool FirstFrame= TRUE;
     CString Length;
     CString omTempByte;
@@ -224,9 +299,10 @@ void CUDSMainWnd::SendContinuosFrames( unsigned char abByteArr[],mPSTXSELMSGDATA
     CString omTempByte;
     CString omByteStrTemp;
     int numberofFrames =0;                      // It will indicate how many multiples frames have been sent
-    int c_numberOfTaken = numberOfTaken+2;      // The consecutive Messages will contain one byte more that the FirstFrame
+    int frameDlc = g_udsCanFd ? UdsTxDlc() : 8;
+    int c_numberOfTaken = g_udsCanFd ? ((frameDlc - 1 - aux_Finterface) * 2) : (numberOfTaken+2);
 
-    int i = aux_Finterface + c_numberOfTaken/2;         // aux_Finterface it's used to indicate that i must be bigger if we're in extended Addressing
+    int i = g_udsCanFd ? (frameDlc - 1) : (aux_Finterface + c_numberOfTaken/2);
     if (TotalLength*2<c_numberOfTaken)          // It only enters here once, at the end when the last message of the multiple frames has to be sent when
     {
         i = TotalLength+aux_Finterface;         // the number of frames that has to be sent is less than c_numberOfTaken
@@ -236,13 +312,18 @@ void CUDSMainWnd::SendContinuosFrames( unsigned char abByteArr[],mPSTXSELMSGDATA
         omByteStrTemp = DatatoSend.Left(c_numberOfTaken);   //I take the part of the message that is going to be sent in the current Frame
         //while(FWait_SendingFrame){}                           // Wait if something is being sent in this moment
 
+        if (g_udsCanFd)
+        {
+            memset(abByteArr, 0, 64);
+        }
         while (omByteStrTemp.GetLength())
         {
             omTempByte = omByteStrTemp.Right(NO_OF_CHAR_IN_BYTE);
             abByteArr[i--] = (BYTE)_tcstol(omTempByte, L'\0', 16);              // It fills the array
             omByteStrTemp = omByteStrTemp.Left(omByteStrTemp.GetLength() - NO_OF_CHAR_IN_BYTE);
         }
-        psTxCanMsgUds->m_psTxMsg->m_ucDataLen = 8;                  // Consecutive Frames can always have 8 bytes
+        psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)frameDlc;
+        psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
         abByteArr[initialByte]= ConsecutiveFrame;                   // Put the initial Byte of the consecutive frames in a long request
         SendSimpleDiagnosticMessage();                              // Send the current Message
 
@@ -269,7 +350,7 @@ void CUDSMainWnd::SendContinuosFrames( unsigned char abByteArr[],mPSTXSELMSGDATA
         c_unPreviousTime = -1;              //ReStart the variables for the timmings
         c_dDiffTime = 0;
 
-        i = aux_Finterface + c_numberOfTaken/2;             // it must be a bigger number in the case of extended addressing-> aux_Finterface to control this.
+        i = g_udsCanFd ? (frameDlc - 1) : (aux_Finterface + c_numberOfTaken/2);
         if (TotalLength*2<c_numberOfTaken)                  // It only enters here once, at the end when the last message of the multiple frames has to be sent when
         {
             i = TotalLength+aux_Finterface;                 // the number of frames that has to be sent is less than c_numberOfTaken
@@ -299,6 +380,7 @@ void CUDSMainWnd::SendSimpleDiagnosticMessage(void)
     // the thread.
     if( psTxCanMsgUds->m_psTxMsg->m_unMsgID != 0 )
     {
+        psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
         //CWinThread* pomThread = NULL ;
         //pomThread = AfxBeginThread( OnSendSelectedMsg, psTxCanMsgUds );
         //FWait_SendingFrame = TRUE;         // No one can send another message  until this procedure has ended
@@ -370,11 +452,26 @@ UINT CUDSMainWnd::OnSendSelectedMsg(LPVOID pParam)
 
 void CUDSMainWnd::PrepareFlowControl()
 {
-
-    Counter_BSize = BSize;                              // BSize and SSTMin  depends of the value put in the settingsWnd.
-    //FWaitLongRespBSize = Counter_BSize;                   // Not used
-    psTxCanMsgUds->m_psTxMsg->m_ucDataLen= SizeFC;      //The DLC of the FCmessage depends of the value put in the settingsWnd.
-    memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, SizeFC);
+    /* ISO-TP FC: 30 | BlockSize | STmin, DLC = Flow Control Length from Settings. */
+    int minLen = initialByte + 3;
+    if (minLen < 3)
+    {
+        minLen = 3;
+    }
+    int dlc = g_udsCanFd ? UdsTxDlc() : SizeFC;
+    if (!g_udsCanFd && (dlc < minLen || dlc > 8))
+    {
+        dlc = (dlc > 8 || dlc <= 0) ? 8 : minLen;
+    }
+    if (g_udsCanFd)
+    {
+        memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, 64);
+    }
+    unsigned char bs = (unsigned char)(BSize & 0xFF);
+    unsigned char st = (unsigned char)(SSTMin & 0xFF);
+    Counter_BSize = BSize;
+    psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
+    memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, 8);
 
     // ################## Casian #############################//
     switch(fInterface)
@@ -382,8 +479,8 @@ void CUDSMainWnd::PrepareFlowControl()
         case INTERFACE_NORMAL_11 :
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = BSize;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = SSTMin; //////
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
             SendSimpleDiagnosticMessage();
 
         };
@@ -393,8 +490,8 @@ void CUDSMainWnd::PrepareFlowControl()
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte-1] = TargetAddress;
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = BSize;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = SSTMin;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
             SendSimpleDiagnosticMessage();
 
         };
@@ -403,8 +500,8 @@ void CUDSMainWnd::PrepareFlowControl()
         case INTERFACE_NORMAL_ISO_29 :
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = BSize;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = SSTMin;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
             SendSimpleDiagnosticMessage();
 
         };
@@ -413,8 +510,8 @@ void CUDSMainWnd::PrepareFlowControl()
         case INTERFACE_NORMAL_J1939_29 :
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = BSize;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = SSTMin;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
 
             SendSimpleDiagnosticMessage();
 
@@ -463,6 +560,46 @@ void CUDSMainWnd::PrepareDiagnosticMessage(CString omByteStr,mPSTXSELMSGDATA psT
     // If it's a simple response: the response could take more time or it could be a 0x78 resp
 
     m_nTimer = SetTimer(ID_TIMER_SEND_BUTTON,P2_Time , NULL);               // Time to wait to enable the send button again
+
+    if (g_udsCanFd)
+    {
+        int dlc = UdsTxDlc();
+        int aux = aux_Finterface;
+        BOOL ext29 = (fInterface == INTERFACE_NORMAL_ISO_29 || fInterface == INTERFACE_NORMAL_J1939_29);
+        psTxCanMsgUds->m_psTxMsg->m_ucEXTENDED = ext29 ? TRUE : FALSE;
+        memset(abByteArr, 0, 64);
+        int sfMax = (dlc > 8) ? (dlc - 2 - aux) : (7 - aux);
+        if ((int)Result <= sfMax)
+        {
+            int dataAt;
+            if (aux > 0)
+            {
+                abByteArr[0] = (BYTE)TargetAddress;
+            }
+            if (dlc <= 8)
+            {
+                abByteArr[aux] = (BYTE)Result;
+                dataAt = aux + 1;
+            }
+            else
+            {
+                abByteArr[aux] = 0x00;
+                abByteArr[aux + 1] = (BYTE)Result;
+                dataAt = aux + 2;
+            }
+            for (UINT n = 0; n < Result; n++)
+            {
+                CString one = omByteStr.Mid(n * 2, 2);
+                abByteArr[dataAt + (int)n] = (BYTE)_tcstol(one, NULL, 16);
+            }
+            psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
+            psTxCanMsgUds->m_psTxMsg->m_bCANFD = true;
+            SendSimpleDiagnosticMessage();
+            return;
+        }
+        SendFirstFrame(omByteStr, abByteArr, psTxCanMsgUds, fInterface);
+        return;
+    }
 
     switch (fInterface)
     {
@@ -707,11 +844,24 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
         psTxCanMsgUds->m_psTxMsg->m_ucRTR = FALSE;
         psTxCanMsgUds->m_psTxMsg->m_ucChannel = (UCHAR)m_omComboChannelUDS.GetCurSel()+1;
         psTxCanMsgUds->m_psTxMsg->m_unMsgID = (int)m_omCanID.lGetValue();
-        memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, 8);               // Initialize the bytes to 0
+        memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, g_udsCanFd ? 64 : 8);
         if(fInterface == INTERFACE_EXTENDED_11 )
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte-1]= TargetAddress;
         }
+        if (g_udsCanFd && UdsTxDlc() > 8)
+        {
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x00;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 1] = 0x02;
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 2] = 0x3E;
+            psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)UdsTxDlc();
+            if (FCRespReq)
+            {
+                psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 3] = 0x80;
+            }
+        }
+        else
+        {
         psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte]= 0x02;          //The tester Present will always have 2 bytes 0x3E y 0x00
         psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1]= 0x3E;
 
@@ -726,6 +876,7 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
         if(FCRespReq)
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2]= 0x80;    // if NoResponse Required is activated
+        }
         }
         SendSimpleDiagnosticMessage();
     }
@@ -1036,7 +1187,39 @@ BOOL CUDSMainWnd::OnInitDialog()
     }
     m_omComboSecTarget.SetCurSel(0);
     ApplySecurityTargetToRequest();
+    ApplyCanFdSwitch();
     return TRUE;
+}
+
+void CUDSMainWnd::ApplyCanFdSwitch()
+{
+    CButton* pChk = (CButton*)GetDlgItem(IDC_CHECK_UDS_CANFD);
+    if (pChk == NULL)
+    {
+        return;
+    }
+    if (!g_udsCanFdHw)
+    {
+        g_udsCanFd = FALSE;
+        pChk->SetCheck(BST_UNCHECKED);
+        pChk->EnableWindow(FALSE);
+        return;
+    }
+    pChk->EnableWindow(TRUE);
+    pChk->SetCheck(g_udsCanFd ? BST_CHECKED : BST_UNCHECKED);
+}
+
+void CUDSMainWnd::OnCanFdSwitch()
+{
+    if (!g_udsCanFdHw)
+    {
+        g_udsCanFd = FALSE;
+        ApplyCanFdSwitch();
+        return;
+    }
+    CButton* pChk = (CButton*)GetDlgItem(IDC_CHECK_UDS_CANFD);
+    g_udsCanFd = (pChk != NULL && pChk->GetCheck() == BST_CHECKED);
+    g_udsFdDlc = 64;
 }
 //________________________________________________________________________________________________________________________________________________________________
 //________________________________________________________________________________________________________________________________________________________________
@@ -1345,8 +1528,16 @@ LRESULT CUDSMainWnd::OnCommandHelp ( WPARAM wParam, LPARAM lParam )
     return S_OK;
 }
 
-LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM /*wParam*/, LPARAM lParam)
+void UdsDrainRx();
+void UdsFlushRx();
+
+LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam)
 {
+    if (wParam == 1 || lParam == 0)
+    {
+        UdsDrainRx();
+        return 0;
+    }
     STCAN_MSG* pMsg = reinterpret_cast<STCAN_MSG*>(lParam);
     if (pMsg != nullptr)
     {
@@ -1356,12 +1547,83 @@ LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM /*wParam*/, LPARAM lParam)
     return 0;
 }
 
+void CUDSMainWnd::ShowResponseBytes(const BYTE* data, int got, int total, BOOL done)
+{
+    HWND h = ::GetDlgItem(m_hWnd, IDC_RESPONSE_DATA);
+    if (h == NULL)
+    {
+        return;
+    }
+    CString text;
+    BOOL full = (done || total <= 4096);
+    if (!full)
+    {
+        text.Format("\r\nReceiving %d / %d bytes...", got, total);
+    }
+    else
+    {
+        int n = got;
+        if (data == NULL || n < 0)
+        {
+            n = 0;
+        }
+        int lines = (n + 14) / 15;
+        int cap = n * 3 + lines * 24 + 80;
+        if (cap < 64)
+        {
+            cap = 64;
+        }
+        char* buf = text.GetBuffer(cap);
+        int o = 0;
+        int pos = 0;
+        while (pos < n)
+        {
+            o += sprintf(buf + o, "\r\n%4d -> ", pos + 1);
+            int take = n - pos;
+            if (take > 15)
+            {
+                take = 15;
+            }
+            for (int i = 0; i < take; i++)
+            {
+                o += sprintf(buf + o, "%02X ", data[pos + i]);
+            }
+            pos += take;
+        }
+        if (done && total > got)
+        {
+            o += sprintf(buf + o, "\r\nIncomplete %d / %d bytes", got, total);
+        }
+        buf[o] = 0;
+        text.ReleaseBuffer(o);
+    }
+    Bytes_to_Show = text;
+    m_abDatas = text;
+    ::SendMessage(h, EM_SETLIMITTEXT, 0, 0);
+    ::SetWindowText(h, text);
+    if (done)
+    {
+        ::SendMessage(h, EM_SETSEL, 0, 0);
+        ::SendMessage(h, EM_SCROLLCARET, 0, 0);
+    }
+}
+
+void CUDSMainWnd::SetResponseService(const CString& text)
+{
+    m_omDiagService = text;
+    SetDlgItemText(IDC_DIAG_SERVICE, text);
+}
+
 void CUDSMainWnd::OnDestroy()
 {
+    UdsFlushRx();
     MSG msg;
     while (PeekMessage(&msg, m_hWnd, WM_UDS_EVALUATE_MSG, WM_UDS_EVALUATE_MSG, PM_REMOVE))
     {
-        delete reinterpret_cast<STCAN_MSG*>(msg.lParam);
+        if (msg.lParam != 0)
+        {
+            delete reinterpret_cast<STCAN_MSG*>(msg.lParam);
+        }
     }
     if (omMainWnd == this)
     {
@@ -2301,4 +2563,16 @@ void CUDSMainWnd::OnBnClickedLogSave()
 void CUDSMainWnd::OnBnClickedLogClear()
 {
     m_omEditLog.SetWindowText("");
+    Bytes_to_Show = "";
+    BytesShown_Line = 1;
+    m_abDatas = "";
+    m_omDiagService = "";
+    SetDlgItemText(IDC_RESPONSE_DATA, "");
+    SetDlgItemText(IDC_DIAG_SERVICE, "");
+    m_omBytes.vSetValue(0);
+    if (omManagerPtr != NULL)
+    {
+        omManagerPtr->Data_Recibida.Empty();
+        omManagerPtr->numberOfBytes = 0;
+    }
 }

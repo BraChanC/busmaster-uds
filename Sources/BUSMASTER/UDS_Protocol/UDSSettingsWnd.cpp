@@ -215,22 +215,31 @@ void CUDSSettingsWnd::OnEnChangeBSize()
 
 void CUDSSettingsWnd::OnCbnSelchangeFCLength()
 {
-    switch(m_omFCLength.GetCurSel() )
+    CString text;
+    int n = 0;
+    m_omFCLength.GetWindowText(text);
+    text.Trim();
+    if (!text.IsEmpty())
     {
-        case 0:
-        {
-            SizeFC=3+aux_Finterface;
-        }
-        break;
-        case 1:
-        {
-            SizeFC=8;
-        }
-        break;
-        default:
-            //do nothing
-            break;
+        n = _ttoi(text);
     }
+    if (n <= 0)
+    {
+        n = (m_omFCLength.GetCurSel() == 1) ? 8 : 3;
+    }
+    if (n == 3)
+    {
+        n = 3 + aux_Finterface;
+    }
+    if (n < 3)
+    {
+        n = 3;
+    }
+    if (n > 8)
+    {
+        n = 8;
+    }
+    SizeFC = n;
 }
 //________________________________________________________________________________________________________________________________________________________________
 //________________________________________________________________________________________________________________________________________________________________

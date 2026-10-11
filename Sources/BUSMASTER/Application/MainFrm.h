@@ -109,6 +109,10 @@ public:
     HANDLE m_hProcess;
     // Flag specifies whether to enable
     INTERFACE_HW_LIST m_asINTERFACE_HW;
+    INTERFACE_HW_LIST m_asCanHwTrace;
+    int m_nCanHwTrace;
+    INTERFACE_HW_LIST m_asLinHwTrace;
+    int m_nLinHwTrace;
     //controller mode
     BYTE m_byControllerMode;
     DWORD m_dwDriverId;
@@ -472,6 +476,8 @@ protected:
     afx_msg void OnCfgnUdsMainWnd();
     afx_msg void OnCfgnUdsSettingsWnd();
     afx_msg void OnCfgnUdsFlashWnd();
+    afx_msg void OnCfgnUdsServerWnd();
+    void vSyncUdsCanFdHardware();
     afx_msg void OnAutomationTSEditor();
     afx_msg void OnAutomationTSExecutor();
 
@@ -519,6 +525,8 @@ public:
     void vClearSignalInfoList(void);
     void vUpdateChannelInfo(void);
     void vUpdateHWStatusInfo(void);
+    void vRememberHardware(BOOL bLin, int nCount);
+    void vWriteHardwareTrace(BOOL bLin, BOOL bConnected);
     bool bFillDbStructure(CMsgNameMsgCodeListDataBase& odMsgNameMsgCodeListDB);
     void vInitialiaseLINConfig(int nChannel = 0);
 private:
