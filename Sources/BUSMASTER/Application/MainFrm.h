@@ -477,6 +477,7 @@ protected:
     afx_msg void OnCfgnUdsSettingsWnd();
     afx_msg void OnCfgnUdsFlashWnd();
     afx_msg void OnCfgnUdsServerWnd();
+    afx_msg void OnCfgnUdsTransferWnd();
     void vSyncUdsCanFdHardware();
     afx_msg void OnAutomationTSEditor();
     afx_msg void OnAutomationTSExecutor();

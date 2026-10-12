@@ -37,6 +37,9 @@ extern "C" {  // only need to export C interface if used by C++ source code
     USAGEMODE HRESULT DIL_UDS_ShowSettingWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowServerWnd(HWND hParent);
+    USAGEMODE HRESULT DIL_UDS_ShowTransferWnd(HWND hParent);
+    USAGEMODE LONG DIL_UDS_ResponseSeq();
+    USAGEMODE int DIL_UDS_CopyResponse(BYTE* out, int cap);
     USAGEMODE HRESULT TX_vSetDILInterfacePtrUDS(void* ptrDILIntrf);
     USAGEMODE HRESULT DIL_MainPanel(HWND hParent,int TotalChannels);
     //int respID;

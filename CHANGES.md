@@ -423,3 +423,32 @@ Diagnostics 菜单和 Ribbon 上增加 **Diagnostic Server**。在这个窗口�
 - 仿真驱动把 `BusEmulation.exe` 登记到当前用户的 `LocalServer32`。`BusEmulation` 改为 `AsInvoker` 链接，避免每次都要管理员权限才能注册。
 - J1939 Activate 不再无限等待一个无法派送消息的工作线程，界面不会因此停住。
 - Flow Control 长度按编辑框里的数字取值，限制在 3 到 8。
+
+---
+
+## 19. Transfer Test、ISO-TP 流控与 PCAN 接收
+
+**Transfer Test**
+
+Diagnostics 菜单增加 **Transfer Test**：按 `34/36/37` 下载、`35/36/37` 上传，带进度条、百分比，以及每个 `36` 块的开始/结束时间戳。
+
+**诊断服务端 ISO-TP**
+
+- `BS>0` 时，每收满一块 Consecutive Frame 再发一次 Flow Control（不再只在首帧后发一次）。
+- Flow Control 的 STmin 按 Settings 原样下发（不再把 `0` 强行改成 `1`）。
+
+**客户端 CF 节拍**
+
+不再用 `SetTimer(1)` 排 CF（Windows 实际约 15 ms，刷写会极慢）。按 FC 的 STmin 用高精度等待；STmin=`0` 时用约 300 µs 间隔，兼顾速度与 USB 接收器承受能力。
+
+**PCAN 接收**
+
+- 只在 `QRCVEMPTY` 时停止读队列；`BUSPASSIVE` 等状态位不再丢掉已读出的帧。
+- 先排空驱动队列再分发；hold 满后立刻继续读。
+
+**涉及文件**
+
+- `Sources/BUSMASTER/UDS_Protocol/UDSTransfer.cpp`、`UDSTransfer.h`
+- `Sources/BUSMASTER/UDS_Protocol/UDSServer.cpp`、`UDSMainWnd.cpp`、`UDS_Protocol.cpp`、`uds.rc`、`resource.h`
+- `Sources/BUSMASTER/CAN_PEAK_USB/CAN_PEAK_USB.cpp`、`PCANBasicLite.h`
+- `Sources/BUSMASTER/Application/MainFrm.cpp`、`MainFrm.h`、`BUSMASTER.rc`、`Resource.h`

@@ -1191,6 +1191,7 @@
 #define IDD_SETTINGS_UDS                40101
 #define IDM_UDS_FLASH                   40102
 #define IDM_UDS_SERVER                  40106
+#define IDM_UDS_TRANSFER                40108
 #define ID_RIBBON_HIDE                  40105
 #define ID_ACCELERATOR40109             40109
 #define ID_BUTTON_TOGGLERIBBON          40111

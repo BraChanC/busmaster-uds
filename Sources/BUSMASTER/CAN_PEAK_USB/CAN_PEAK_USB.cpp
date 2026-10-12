@@ -428,7 +428,7 @@ static INT EnumeratePeakChannels(INTERFACE_HW_LIST& asList)
         char acName[64] = {0};
         sg_CAN_GetValue(sg_UsbHandles[i], PCAN_HARDWARE_NAME, acName, sizeof(acName));
         DWORD dwDevId = 0;
-        // 0 and 0xFFFFFFFF mean "device number not set" on a multi-channel PCAN.
+        // 0 / 0xFFFFFFFF are invalid; fall back so each channel stays distinguishable.
         if (sg_CAN_GetValue(sg_UsbHandles[i], PCAN_DEVICE_ID, &dwDevId, sizeof(dwDevId)) != PCAN_ERROR_OK
             || dwDevId == 0 || dwDevId == 0xFFFFFFFFu)
         {
@@ -545,20 +545,111 @@ static void DispatchPcanMessage(int nChannelIndex, const TPCANMsg& msg, const TP
     vWriteIntoClientsBuffer(can_data);
 }
 
+/* Peak sample pattern: keep reading until QRCVEMPTY. CAN_Read already filled
+   MessageBuffer for any non-empty status. Requiring st==OK after masking
+   discards that frame when BUSPASSIVE (0x40000) or other warning bits appear. */
+static BOOL bPcanFrameRead(TPCANStatus st)
+{
+    return (st & PCAN_ERROR_QRCVEMPTY) != PCAN_ERROR_QRCVEMPTY;
+}
+
+enum { PEAK_RX_HOLD = 4096 };
+
+struct SPEAK_RX_HOLD
+{
+    INT nChannel;
+    BOOL bFd;
+    TPCANMsg msg;
+    TPCANTimestamp ts;
+    TPCANMsgFD msgFd;
+    TPCANTimestampFD tsFd;
+};
+
+static SPEAK_RX_HOLD sg_asRxHold[PEAK_RX_HOLD];
+
+static void vDrainPeakChannel(INT nIndex)
+{
+    if (nIndex < 0 || nIndex >= sg_nNoOfChannels)
+    {
+        return;
+    }
+    /* Drain in batches. If the hold fills, publish and immediately read more
+       so a long STmin=0 CF burst cannot refill the Peak queue during wait. */
+    for (;;)
+    {
+        int nHold = 0;
+        if (sg_abCanFd[nIndex] && sg_CAN_ReadFD != nullptr)
+        {
+            while (nHold < PEAK_RX_HOLD)
+            {
+                TPCANStatus st = sg_CAN_ReadFD(sg_anHandles[nIndex],
+                                               &sg_asRxHold[nHold].msgFd,
+                                               &sg_asRxHold[nHold].tsFd);
+                if (!bPcanFrameRead(st))
+                {
+                    break;
+                }
+                sg_asRxHold[nHold].nChannel = nIndex;
+                sg_asRxHold[nHold].bFd = TRUE;
+                nHold++;
+            }
+        }
+        else if (sg_CAN_Read != nullptr)
+        {
+            while (nHold < PEAK_RX_HOLD)
+            {
+                TPCANStatus st = sg_CAN_Read(sg_anHandles[nIndex],
+                                             &sg_asRxHold[nHold].msg,
+                                             &sg_asRxHold[nHold].ts);
+                if (!bPcanFrameRead(st))
+                {
+                    break;
+                }
+                sg_asRxHold[nHold].nChannel = nIndex;
+                sg_asRxHold[nHold].bFd = FALSE;
+                nHold++;
+            }
+        }
+        if (nHold == 0)
+        {
+            return;
+        }
+        EnterCriticalSection(&sg_DIL_CriticalSection);
+        for (int i = 0; i < nHold; i++)
+        {
+            if (sg_asRxHold[i].bFd)
+            {
+                DispatchPcanMessageFD(sg_asRxHold[i].nChannel,
+                                      sg_asRxHold[i].msgFd,
+                                      sg_asRxHold[i].tsFd);
+            }
+            else
+            {
+                DispatchPcanMessage(sg_asRxHold[i].nChannel,
+                                    sg_asRxHold[i].msg,
+                                    sg_asRxHold[i].ts);
+            }
+        }
+        LeaveCriticalSection(&sg_DIL_CriticalSection);
+        if (nHold < PEAK_RX_HOLD)
+        {
+            return;
+        }
+    }
+}
+
 static DWORD WINAPI PeakRxThread(LPVOID)
 {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     while (sg_bRxRun)
     {
         HANDLE ahWait[MAX_PEAK_CHANNELS];
         INT nWait = 0;
-        INT anMap[MAX_PEAK_CHANNELS];
         for (INT i = 0; i < sg_nNoOfChannels; i++)
         {
             if (sg_ahRxEvent[i] != nullptr)
             {
-                ahWait[nWait] = sg_ahRxEvent[i];
-                anMap[nWait] = i;
-                nWait++;
+                ahWait[nWait++] = sg_ahRxEvent[i];
             }
         }
         if (nWait == 0)
@@ -566,47 +657,10 @@ static DWORD WINAPI PeakRxThread(LPVOID)
             Sleep(10);
             continue;
         }
-        DWORD dw = WaitForMultipleObjects((DWORD)nWait, ahWait, FALSE, 50);
-        if (dw < WAIT_OBJECT_0 || dw >= WAIT_OBJECT_0 + (DWORD)nWait)
+        WaitForMultipleObjects((DWORD)nWait, ahWait, FALSE, 1);
+        for (INT i = 0; i < sg_nNoOfChannels; i++)
         {
-            continue;
-        }
-        INT nIndex = anMap[dw - WAIT_OBJECT_0];
-        for (;;)
-        {
-            if (sg_abCanFd[nIndex] && sg_CAN_ReadFD != nullptr)
-            {
-                TPCANMsgFD msgFd;
-                TPCANTimestampFD tsFd = 0;
-                memset(&msgFd, 0, sizeof(msgFd));
-                TPCANStatus st = sg_CAN_ReadFD(sg_anHandles[nIndex], &msgFd, &tsFd);
-                if (st == PCAN_ERROR_QRCVEMPTY || st != PCAN_ERROR_OK)
-                {
-                    break;
-                }
-                EnterCriticalSection(&sg_DIL_CriticalSection);
-                DispatchPcanMessageFD(nIndex, msgFd, tsFd);
-                LeaveCriticalSection(&sg_DIL_CriticalSection);
-            }
-            else if (sg_CAN_Read != nullptr)
-            {
-                TPCANMsg msg;
-                TPCANTimestamp ts;
-                memset(&msg, 0, sizeof(msg));
-                memset(&ts, 0, sizeof(ts));
-                TPCANStatus st = sg_CAN_Read(sg_anHandles[nIndex], &msg, &ts);
-                if (st == PCAN_ERROR_QRCVEMPTY || st != PCAN_ERROR_OK)
-                {
-                    break;
-                }
-                EnterCriticalSection(&sg_DIL_CriticalSection);
-                DispatchPcanMessage(nIndex, msg, ts);
-                LeaveCriticalSection(&sg_DIL_CriticalSection);
-            }
-            else
-            {
-                break;
-            }
+            vDrainPeakChannel(i);
         }
     }
     return 0;

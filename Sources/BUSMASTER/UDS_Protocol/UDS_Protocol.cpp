@@ -14,6 +14,7 @@
 #include "UDSSettingsWnd.h"
 #include "UDSFlashWnd.h"
 #include "UDSServer.h"
+#include "UDSTransfer.h"
 #include "UDS_Protocol.h"
 #include "CANDriverDefines.h"
 
@@ -210,6 +211,12 @@ USAGEMODE HRESULT DIL_UDS_ShowServerWnd(HWND hParent)
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
     return UdsServer_Show(hParent);
 }
+
+USAGEMODE HRESULT DIL_UDS_ShowTransferWnd(HWND hParent)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    return UdsTransfer_Show(hParent);
+}
 /**********************************************************************************************************
  Function Name  :   UpdateChannelUDS
 
@@ -249,6 +256,160 @@ USAGEMODE HRESULT UpdateChannelUDS(HWND hParent)
  Date Created   :   19.06.2013
 /**********************************************************************************************************/
 
+static BYTE* g_capBuf = NULL;
+static int g_capLen = 0;
+static int g_capCap = 0;
+static volatile LONG g_capSeq = 0;
+static CRITICAL_SECTION g_capCs;
+static BOOL g_capCsReady = FALSE;
+
+struct UdsCapRecent
+{
+    DWORD hash;
+    DWORD tick;
+    int len;
+    BYTE head[8];
+};
+
+static UdsCapRecent g_capRecent[8];
+static int g_capRecentN = 0;
+
+static void EnsureCapCs()
+{
+    if (!g_capCsReady)
+    {
+        InitializeCriticalSection(&g_capCs);
+        g_capCsReady = TRUE;
+    }
+}
+
+static DWORD CapHash(const BYTE* data, int n)
+{
+    DWORD h = (DWORD)n;
+    for (int i = 0; i < n; i++)
+    {
+        h = (h * 16777619u) ^ data[i];
+    }
+    return h;
+}
+
+static BOOL CapSeenLocked(const BYTE* data, int n)
+{
+    if (data == NULL || n <= 0)
+    {
+        return FALSE;
+    }
+    DWORD now = GetTickCount();
+    DWORD hash = CapHash(data, n);
+    int head = (n < 8) ? n : 8;
+    int count = (g_capRecentN < 8) ? g_capRecentN : 8;
+    for (int i = 0; i < count; i++)
+    {
+        if (g_capRecent[i].len == n && g_capRecent[i].hash == hash
+                && (now - g_capRecent[i].tick) < 8000
+                && memcmp(g_capRecent[i].head, data, head) == 0)
+        {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void CapRememberLocked(const BYTE* data, int n)
+{
+    if (data == NULL || n <= 0)
+    {
+        return;
+    }
+    UdsCapRecent& slot = g_capRecent[g_capRecentN & 7];
+    slot.hash = CapHash(data, n);
+    slot.tick = GetTickCount();
+    slot.len = n;
+    int head = (n < 8) ? n : 8;
+    memset(slot.head, 0, sizeof(slot.head));
+    memcpy(slot.head, data, head);
+    g_capRecentN++;
+}
+
+static void StoreCapLocked(const BYTE* data, int n, BOOL remember)
+{
+    if (n < 0)
+    {
+        n = 0;
+    }
+    if (n > 0x100000)
+    {
+        n = 0x100000;
+    }
+    if (!remember && CapSeenLocked(data, n))
+    {
+        return;
+    }
+    if (g_capCap < n)
+    {
+        delete[] g_capBuf;
+        g_capCap = (n < 256) ? 256 : n;
+        g_capBuf = new BYTE[g_capCap];
+    }
+    if (n > 0 && data != NULL && g_capBuf != NULL)
+    {
+        memcpy(g_capBuf, data, n);
+    }
+    g_capLen = n;
+    if (remember)
+    {
+        CapRememberLocked(data, n);
+    }
+    InterlockedIncrement(&g_capSeq);
+}
+
+static void CaptureUdsResponse(const BYTE* data, int n)
+{
+    EnsureCapCs();
+    EnterCriticalSection(&g_capCs);
+    StoreCapLocked(data, n, FALSE);
+    LeaveCriticalSection(&g_capCs);
+}
+
+void UdsPublishServerResponse(const BYTE* data, int n)
+{
+    if (data == NULL || n <= 0)
+    {
+        return;
+    }
+    EnsureCapCs();
+    EnterCriticalSection(&g_capCs);
+    StoreCapLocked(data, n, TRUE);
+    LeaveCriticalSection(&g_capCs);
+}
+
+USAGEMODE LONG DIL_UDS_ResponseSeq()
+{
+    return g_capSeq;
+}
+
+USAGEMODE int DIL_UDS_CopyResponse(BYTE* out, int cap)
+{
+    EnsureCapCs();
+    EnterCriticalSection(&g_capCs);
+    int n = g_capLen;
+    if (n < 0)
+    {
+        n = 0;
+    }
+    int copy = n;
+    if (copy > cap)
+    {
+        copy = cap;
+    }
+    if (copy > 0 && out != NULL && g_capBuf != NULL)
+    {
+        memcpy(out, g_capBuf, copy);
+    }
+    LeaveCriticalSection(&g_capCs);
+    return n;
+}
+
 void CUDS_Protocol::Show_ResponseData(unsigned char psMsg[], unsigned char Datalen , int posFirstByte )
 {
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
@@ -286,6 +447,12 @@ void CUDS_Protocol::Show_ResponseData(unsigned char psMsg[], unsigned char Datal
         omMainWnd->m_abDatas = Bytes_to_Show + '\0';
 
         omMainWnd->UpdateData(false);
+        int pay = loc - (posFirstByte + 1);
+        if (pay < 0)
+        {
+            pay = 0;
+        }
+        CaptureUdsResponse((pay > 0) ? (psMsg + posFirstByte + 1) : NULL, pay);
     }
 }
 
@@ -496,6 +663,10 @@ static void PublishLongResponse(BOOL done)
     }
     g_longPub = g_longGot;
     omMainWnd->ShowResponseBytes(g_longBuf, g_longGot, g_longTotal, done);
+    if (done)
+    {
+        CaptureUdsResponse(g_longBuf, g_longGot);
+    }
     if (done && omManagerPtr != NULL)
     {
         CString hex;
@@ -570,9 +741,10 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
                     {
                         STMin = psMsg[initialByte+2];
                     }
-                    else if( 0xF1<=psMsg[initialByte+2]<=0xF9)
+                    else if (psMsg[initialByte+2] >= 0xF1 && psMsg[initialByte+2] <= 0xF9)
                     {
-                        STMin = (psMsg[initialByte+2]&0x0F)*0.1;
+                        /* Spec is 100 us units; int STMin is milliseconds. */
+                        STMin = 1;
                     }
                     else
                     {

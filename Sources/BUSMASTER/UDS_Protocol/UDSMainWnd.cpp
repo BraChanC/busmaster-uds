@@ -23,6 +23,47 @@ extern "C" HRESULT EvaluateMessage(STCAN_MSG Mensaje);
 BOOL FWait_SendingFrame=FALSE;
 /** This variable is used to indicate that the system should wait for a flow control */
 bool FWaitFlow = FALSE;
+static int s_cfBlockCount = 0;
+static int s_cfBusy = 0;
+/* After FC / FF, first CF needs no extra gap; later CFs honor STMin. */
+static int s_cfNeedGap = 0;
+
+/* STMin==0 still needs a tiny gap: USB adapters (PCAN) drop when CF is blasted
+   with PostMessage and zero delay. 300 us is near one classic CAN frame and
+   keeps 1 MiB in about a minute instead of tens of minutes from SetTimer(1). */
+static void PaceNextCfGap(int stMinMs)
+{
+    static LARGE_INTEGER s_freq = {0};
+    if (s_freq.QuadPart == 0)
+    {
+        QueryPerformanceFrequency(&s_freq);
+        if (s_freq.QuadPart == 0)
+        {
+            return;
+        }
+    }
+    LONGLONG needTicks;
+    if (stMinMs <= 0)
+    {
+        needTicks = s_freq.QuadPart / 3333; /* ~300 us */
+    }
+    else
+    {
+        needTicks = (s_freq.QuadPart * (LONGLONG)stMinMs) / 1000;
+    }
+    if (needTicks <= 0)
+    {
+        return;
+    }
+    LARGE_INTEGER t0;
+    LARGE_INTEGER t1;
+    QueryPerformanceCounter(&t0);
+    do
+    {
+        QueryPerformanceCounter(&t1);
+    }
+    while ((t1.QuadPart - t0.QuadPart) < needTicks);
+}
 bool FlagTP = FALSE;
 int Counter_BSize;
 BOOL g_bStopSelectedMsgTx = TRUE;
@@ -121,6 +162,7 @@ BEGIN_MESSAGE_MAP(CUDSMainWnd, CDialog)
     ON_WM_CHAR ()
     ON_MESSAGE (WM_COMMANDHELP, CUDSMainWnd::OnCommandHelp )
     ON_MESSAGE (WM_UDS_EVALUATE_MSG, OnEvaluateCanMsg )
+    ON_MESSAGE (WM_UDS_CONTINUE_CF, OnContinueCf )
     ON_WM_DESTROY()
 
 END_MESSAGE_MAP()
@@ -238,43 +280,58 @@ int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mP
         TotalLength = (((UINT)TotalLength * 2) - takenChars) / 2;
         FWaitFlow = TRUE;
         ConsecutiveFrame = 0x21;
+        s_cfBlockCount = 0;
+        s_cfNeedGap = 0;
         return 0;
     }
-    bool FirstFrame= TRUE;
-    CString Length;
-    CString omTempByte;
-    CString omByteStrTemp;
-    //int numberofFrames =-1    ;
-    int c_numberOfTaken= numberOfTaken;                             // It contains the number of Data bytes that can be sent in the current message
-
-    Length.Format("%.3x\n",TotalLength);                        //Prepare the first 2 bytes of a first frame of a long request
-    Length = "1" + Length;
-    omTempByte = Length.Left(2);
-    abByteArr[initialByte]= (BYTE)_tcstol(omTempByte, L'\0', 16);
-    omTempByte = Length.Right(3);
-    abByteArr[initialByte+1]= (BYTE)_tcstol(omTempByte,L'\0', 16);
-
-    int i=7;
-    omByteStrTemp = omByteStr.Left(c_numberOfTaken);                //I take the part of omByteStr that is going to be sent in the first Frame
-
-    //while(FWait_SendingFrame){}                                       // Wait if something is being sent in this moment
-    while (omByteStrTemp.GetLength())
+    int pci = initialByte;
+    if (pci < 0)
     {
-        omTempByte = omByteStrTemp.Right(NO_OF_CHAR_IN_BYTE);
-        abByteArr[i--] = (BYTE)_tcstol(omTempByte, L'\0', 16);      // Fill the array to sent with the current data
-        omByteStrTemp = omByteStrTemp.Left(omByteStrTemp.GetLength() - NO_OF_CHAR_IN_BYTE);
+        pci = 0;
     }
-    psTxCanMsgUds->m_psTxMsg->m_ucDataLen = 8;                  // The FirstFrame always has 8 butes
+    int ffData = 6 - aux_Finterface;
+    if (ffData < 1)
+    {
+        ffData = 1;
+    }
+    if (ffData > (int)TotalLength)
+    {
+        ffData = (int)TotalLength;
+    }
+    if (pci + 2 + ffData > 8)
+    {
+        ffData = 8 - pci - 2;
+    }
+    if (ffData < 1)
+    {
+        ffData = 1;
+    }
+    for (int k = pci; k < 8; k++)
+    {
+        abByteArr[k] = 0;
+    }
+    abByteArr[pci] = (BYTE)(0x10 | ((TotalLength >> 8) & 0x0F));
+    abByteArr[pci + 1] = (BYTE)(TotalLength & 0xFF);
+    for (int n = 0; n < ffData; n++)
+    {
+        CString one = omByteStr.Mid(n * 2, 2);
+        abByteArr[pci + 2 + n] = (BYTE)_tcstol(one, NULL, 16);
+    }
+    psTxCanMsgUds->m_psTxMsg->m_ucDataLen = 8;
+    psTxCanMsgUds->m_psTxMsg->m_bCANFD = false;
+    SendSimpleDiagnosticMessage();
 
-    SendSimpleDiagnosticMessage();                              //Send the message
-
-    omByteStr = omByteStr.Right(((UINT)TotalLength*2)-c_numberOfTaken);          // The bytes that were sent are deleted
-    DatatoSend =  omByteStr.Right(((UINT)TotalLength*2)-c_numberOfTaken);        // DatatoSend will contain the rest of the bytes that hasn't been sent yet.
-    TotalLength = (((UINT)TotalLength*2)-c_numberOfTaken)/2;
-
-    FirstFrame = FALSE;
-    FWaitFlow =TRUE;                    // No Wait for the Flow Control comming from the ECU
-    ConsecutiveFrame = 0x21;            //Initialize this -> because a long frame will be sent
+    int takenChars = ffData * 2;
+    if (takenChars > omByteStr.GetLength())
+    {
+        takenChars = omByteStr.GetLength();
+    }
+    DatatoSend = omByteStr.Mid(takenChars);
+    TotalLength = (UINT)(DatatoSend.GetLength() / 2);
+    FWaitFlow = TRUE;
+    ConsecutiveFrame = 0x21;
+    s_cfBlockCount = 0;
+    s_cfNeedGap = 0;
     return 0;
 }
 
@@ -294,70 +351,115 @@ int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mP
 
 void CUDSMainWnd::SendContinuosFrames( unsigned char abByteArr[],mPSTXSELMSGDATA psTxCanMsgUds, UDS_INTERFACE FInterface)
 {
-
-    CString Length;
-    CString omTempByte;
-    CString omByteStrTemp;
-    int numberofFrames =0;                      // It will indicate how many multiples frames have been sent
+    if (s_cfBusy)
+    {
+        return;
+    }
+    s_cfBusy = 1;
+    if (s_cfNeedGap)
+    {
+        PaceNextCfGap(STMin);
+    }
+    s_cfNeedGap = 1;
     int frameDlc = g_udsCanFd ? UdsTxDlc() : 8;
-    int c_numberOfTaken = g_udsCanFd ? ((frameDlc - 1 - aux_Finterface) * 2) : (numberOfTaken+2);
-
-    int i = g_udsCanFd ? (frameDlc - 1) : (aux_Finterface + c_numberOfTaken/2);
-    if (TotalLength*2<c_numberOfTaken)          // It only enters here once, at the end when the last message of the multiple frames has to be sent when
+    int pci = initialByte;
+    if (pci < 0)
     {
-        i = TotalLength+aux_Finterface;         // the number of frames that has to be sent is less than c_numberOfTaken
+        pci = 0;
     }
-    while (DatatoSend.GetLength())                          // While there is remaining data that has to be sent
+    int cfBytes = frameDlc - 1 - aux_Finterface;
+    if (cfBytes < 1)
     {
-        omByteStrTemp = DatatoSend.Left(c_numberOfTaken);   //I take the part of the message that is going to be sent in the current Frame
-        //while(FWait_SendingFrame){}                           // Wait if something is being sent in this moment
+        cfBytes = 1;
+    }
+    if (pci + 1 + cfBytes > frameDlc)
+    {
+        cfBytes = frameDlc - pci - 1;
+    }
+    if (cfBytes < 1)
+    {
+        cfBytes = 1;
+    }
+    if (DatatoSend.GetLength() < 2)
+    {
+        s_cfBlockCount = 0;
+        s_cfBusy = 0;
+        m_omSendButton.EnableWindow(TRUE);
+        return;
+    }
+    int nbytes = DatatoSend.GetLength() / 2;
+    if (nbytes > cfBytes)
+    {
+        nbytes = cfBytes;
+    }
+    if (g_udsCanFd)
+    {
+        memset(abByteArr, 0, 64);
+    }
+    else
+    {
+        for (int k = pci; k < frameDlc && k < 64; k++)
+        {
+            abByteArr[k] = 0;
+        }
+    }
+    abByteArr[pci] = (BYTE)ConsecutiveFrame;
+    for (int n = 0; n < nbytes; n++)
+    {
+        CString one = DatatoSend.Mid(n * 2, 2);
+        abByteArr[pci + 1 + n] = (BYTE)_tcstol(one, NULL, 16);
+    }
+    psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)frameDlc;
+    psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
+    SendSimpleDiagnosticMessage();
 
-        if (g_udsCanFd)
-        {
-            memset(abByteArr, 0, 64);
-        }
-        while (omByteStrTemp.GetLength())
-        {
-            omTempByte = omByteStrTemp.Right(NO_OF_CHAR_IN_BYTE);
-            abByteArr[i--] = (BYTE)_tcstol(omTempByte, L'\0', 16);              // It fills the array
-            omByteStrTemp = omByteStrTemp.Left(omByteStrTemp.GetLength() - NO_OF_CHAR_IN_BYTE);
-        }
-        psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)frameDlc;
-        psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
-        abByteArr[initialByte]= ConsecutiveFrame;                   // Put the initial Byte of the consecutive frames in a long request
-        SendSimpleDiagnosticMessage();                              // Send the current Message
-
-        DatatoSend = DatatoSend.Right(((UINT)TotalLength*2)-c_numberOfTaken);        // DatatoSend will contain the rest of the bytes that hasn't been sent yet.
-        TotalLength = (((UINT)TotalLength*2)-c_numberOfTaken)/2;
-        ConsecutiveFrame++;
-        if (ConsecutiveFrame == 0x30)
-        {
-            ConsecutiveFrame=0x20;    // Requirement from the ISO TP
-        }
-        numberofFrames++;
-
-        if (numberofFrames == BSizE)        // It enters here when I've reached the quantity of Blocks settled by the ECU in the flow Control
-        {
-            FWaitFlow = TRUE;               // Now it has to wait for the Flow control again
-            numberofFrames = 0;
-            c_dDiffTime =0;
-            return ;                        // Now it has to wait for another FlowControl
-        }
-        else
-        {
-            for(c_dDiffTime =0,c_unPreviousTime =-1 ; c_dDiffTime <=STMin; CalculateDiffTime()) {}      // Wait for the STMin Time settled by the ECU in the flow Control
-        }
-        c_unPreviousTime = -1;              //ReStart the variables for the timmings
+    DatatoSend = DatatoSend.Mid(nbytes * 2);
+    TotalLength = (UINT)(DatatoSend.GetLength() / 2);
+    ConsecutiveFrame++;
+    if (ConsecutiveFrame == 0x30)
+    {
+        ConsecutiveFrame = 0x20;
+    }
+    s_cfBlockCount++;
+    if (BSizE > 0 && s_cfBlockCount >= BSizE)
+    {
+        s_cfBlockCount = 0;
+        s_cfBusy = 0;
+        s_cfNeedGap = 0;
+        KillTimer(ID_TIMER_CF);
+        FWaitFlow = TRUE;
         c_dDiffTime = 0;
-
-        i = g_udsCanFd ? (frameDlc - 1) : (aux_Finterface + c_numberOfTaken/2);
-        if (TotalLength*2<c_numberOfTaken)                  // It only enters here once, at the end when the last message of the multiple frames has to be sent when
-        {
-            i = TotalLength+aux_Finterface;                 // the number of frames that has to be sent is less than c_numberOfTaken
-        }
+        return;
     }
-    m_omSendButton.EnableWindow(TRUE);      // It only enters here when it has sent all the msg
-    // In the case that this function cannot be completed there is a timer as default to activate the SEND button
+    c_unPreviousTime = -1;
+    c_dDiffTime = 0;
+    s_cfBusy = 0;
+    if (DatatoSend.GetLength() >= 2)
+    {
+        KillTimer(ID_TIMER_CF);
+        /* Do not use SetTimer(1): WM_TIMER is ~15 ms and makes bootloader
+           transfers unusable. Pace with QPC, then continue on the UI queue. */
+        PostMessage(WM_UDS_CONTINUE_CF, 0, 0);
+        return;
+    }
+    KillTimer(ID_TIMER_CF);
+    s_cfBlockCount = 0;
+    s_cfNeedGap = 0;
+    m_omSendButton.EnableWindow(TRUE);
+}
+
+LRESULT CUDSMainWnd::OnContinueCf(WPARAM /*wParam*/, LPARAM /*lParam*/)
+{
+    if (FWaitFlow || psTxCanMsgUds == NULL || psTxCanMsgUds->m_psTxMsg == NULL)
+    {
+        return 0;
+    }
+    if (DatatoSend.GetLength() < 2)
+    {
+        return 0;
+    }
+    SendContinuosFrames(psTxCanMsgUds->m_psTxMsg->m_ucData, psTxCanMsgUds, fInterface);
+    return 0;
 }
 
 /**********************************************************************************************************
@@ -884,6 +986,11 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
     {
         m_omSendButton.EnableWindow(TRUE);
         KillTimer(ID_TIMER_SEND_BUTTON);
+    }
+    if (nIDEvent == ID_TIMER_CF)
+    {
+        KillTimer(ID_TIMER_CF);
+        OnContinueCf(0, 0);
     }
     if (nIDEvent == ID_TIMER_CYCLIC)
     {
@@ -1616,8 +1723,12 @@ void CUDSMainWnd::SetResponseService(const CString& text)
 
 void CUDSMainWnd::OnDestroy()
 {
+    KillTimer(ID_TIMER_CF);
     UdsFlushRx();
     MSG msg;
+    while (PeekMessage(&msg, m_hWnd, WM_UDS_CONTINUE_CF, WM_UDS_CONTINUE_CF, PM_REMOVE))
+    {
+    }
     while (PeekMessage(&msg, m_hWnd, WM_UDS_EVALUATE_MSG, WM_UDS_EVALUATE_MSG, PM_REMOVE))
     {
         if (msg.lParam != 0)

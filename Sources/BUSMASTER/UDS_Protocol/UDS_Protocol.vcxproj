@@ -105,7 +105,7 @@
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)/Utils.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)/DataTypes.lib" %(AdditionalOptions)</AdditionalOptions>
       <OutputFile>$(SolutionDir)/BIN/$(OutDir)UDS_Protocol.dll</OutputFile>
-      <AdditionalDependencies>HTMLHELP.lib</AdditionalDependencies>
+      <AdditionalDependencies>Winmm.lib;HTMLHELP.lib</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -187,8 +187,9 @@
     <ClCompile Include="UDS_Protocol.cpp" />
     <ClCompile Include="UDS_TimmingWnd.cpp" />
     <ClCompile Include="UDSFlashWnd.cpp" />
-    <ClCompile Include="UDSMainWnd.cpp" />
     <ClCompile Include="UDSServer.cpp" />
+    <ClCompile Include="UDSTransfer.cpp" />
+    <ClCompile Include="UDSMainWnd.cpp" />
     <ClCompile Include="UDSSettingsWnd.cpp" />
     <ClCompile Include="VectorSeedKey.cpp" />
   </ItemGroup>
@@ -204,6 +205,7 @@
     <ClInclude Include="UDSIso14229.h" />
     <ClInclude Include="UDSMainWnd.h" />
     <ClInclude Include="UDSServer.h" />
+    <ClInclude Include="UDSTransfer.h" />
     <ClInclude Include="UDSSettingsWnd.h" />
     <ClInclude Include="UDSWnd_Defines.h" />
     <ClInclude Include="VectorSeedKey.h" />

@@ -299,6 +299,7 @@ BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWndEx)
     ON_COMMAND(IDD_SETTINGS_UDS,OnCfgnUdsSettingsWnd)
     ON_COMMAND(IDM_UDS_FLASH,OnCfgnUdsFlashWnd)
     ON_COMMAND(IDM_UDS_SERVER,OnCfgnUdsServerWnd)
+    ON_COMMAND(IDM_UDS_TRANSFER,OnCfgnUdsTransferWnd)
     ON_WM_SHOWWINDOW()
     ON_WM_DESTROY()
     ON_UPDATE_COMMAND_UI(ID_FILE_NEW, OnUpdateFileNew)
@@ -7987,6 +7988,18 @@ void CMainFrame::OnCfgnUdsFlashWnd()
 void CMainFrame::OnCfgnUdsServerWnd()
 {
     DIL_UDS_ShowServerWnd(this->m_hWnd);
+}
+
+void CMainFrame::OnCfgnUdsTransferWnd()
+{
+    LPARAM lParam = 1;
+    if (GetICANDIL() != NULL)
+    {
+        GetICANDIL()->DILC_GetControllerParams(lParam, 0, NUMBER_HW);
+    }
+    vSyncUdsCanFdHardware();
+    DIL_UDS_ShowWnd(this->m_hWnd, (int)lParam);
+    DIL_UDS_ShowTransferWnd(this->m_hWnd);
 }
 /******************************************************************************/
 /*  Function Name    :  OnUpdateConfigureBaudrate                             */

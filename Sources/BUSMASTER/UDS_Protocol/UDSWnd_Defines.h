@@ -13,6 +13,7 @@ const int NO_OF_CHAR_IN_BYTE = 2;
 
 /** Posted from the CAN read thread so UDS UI is updated on the window thread. */
 #define WM_UDS_EVALUATE_MSG (WM_APP + 0x51)
+#define WM_UDS_CONTINUE_CF  (WM_APP + 0x53)
 
 
 /** Message Structure */

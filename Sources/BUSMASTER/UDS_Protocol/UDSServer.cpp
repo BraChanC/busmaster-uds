@@ -1307,6 +1307,7 @@ public:
         m_rxExpect = 0;
         m_rxGot = 0;
         m_rxSeq = 1;
+        m_rxCfInBlock = 0;
         m_rxCh = 1;
         m_txState = ST_IDLE;
         m_txLen = 0;
@@ -1343,6 +1344,18 @@ public:
         m_parseStop = 0;
         m_parseSem = NULL;
         m_parseThread = NULL;
+        m_xferOn = FALSE;
+        m_xferAddr = 0;
+        m_xferBlock = 128;
+        m_dlPath[0] = 0;
+        m_ulPath[0] = 0;
+        m_xfBuf = NULL;
+        m_xfSize = 0;
+        m_xfGot = 0;
+        m_xfMode = 0;
+        m_xfSeq = 1;
+        m_xfBlock = 128;
+        m_xfSave[0] = 0;
     }
 
     ~CUdsServerEngine()
@@ -1371,6 +1384,7 @@ public:
         }
         m_parseTail = NULL;
         FreeAllCache();
+        FreeXfer();
         delete[] m_txHold;
         m_txHold = NULL;
     }
@@ -1848,6 +1862,15 @@ private:
         {
             fprintf(f, "V %s\n", m_variant);
         }
+        fprintf(f, "T %d %X %d\n", m_xferOn ? 1 : 0, m_xferAddr, m_xferBlock);
+        if (m_dlPath[0] != 0)
+        {
+            fprintf(f, "TD %s\n", m_dlPath);
+        }
+        if (m_ulPath[0] != 0)
+        {
+            fprintf(f, "TU %s\n", m_ulPath);
+        }
         for (int i = 0; i < m_nRows; i++)
         {
             fprintf(f, "R %d %02X ", m_rows[i].on ? 1 : 0, m_rows[i].sid);
@@ -1903,6 +1926,12 @@ private:
         m_pendingLen = 0;
         m_unlocked = FALSE;
         m_keyFails = 0;
+        m_xferOn = FALSE;
+        m_xferAddr = 0;
+        m_xferBlock = 128;
+        m_dlPath[0] = 0;
+        m_ulPath[0] = 0;
+        FreeXfer();
         FreeAllCache();
     }
 
@@ -1941,6 +1970,41 @@ private:
                     {
                         m_ext = TRUE;
                     }
+                }
+            }
+            else if (strncmp(line, "TD ", 3) == 0 || strncmp(line, "TU ", 3) == 0)
+            {
+                char* dst = (line[1] == 'D') ? m_dlPath : m_ulPath;
+                const char* p = line + 3;
+                while (*p == ' ')
+                {
+                    p++;
+                }
+                strncpy_s(dst, MAX_PATH, p, _TRUNCATE);
+                size_t n = strlen(dst);
+                while (n > 0 && (dst[n - 1] == '\n' || dst[n - 1] == '\r' || dst[n - 1] == ' '))
+                {
+                    dst[--n] = 0;
+                }
+            }
+            else if (line[0] == 'T')
+            {
+                int en = 0;
+                int block = 128;
+                unsigned addr = 0;
+                if (sscanf(line, "T %d %x %d", &en, &addr, &block) >= 1)
+                {
+                    m_xferOn = en ? TRUE : FALSE;
+                    m_xferAddr = addr;
+                    if (block < 1)
+                    {
+                        block = 128;
+                    }
+                    if (block > 4093)
+                    {
+                        block = 4093;
+                    }
+                    m_xferBlock = block;
                 }
             }
             else if (line[0] == 'R')
@@ -2203,6 +2267,7 @@ private:
             _snprintf(act.log, sizeof(act.log), "%s", log);
             act.log[sizeof(act.log) - 1] = 0;
         }
+        UdsPublishServerResponse(resp, rlen);
         int txDlc = g_udsCanFd ? g_udsFdDlc : 8;
         if (txDlc < 8)
         {
@@ -2626,6 +2691,322 @@ private:
         return TRUE;
     }
 
+    void FreeXfer()
+    {
+        delete[] m_xfBuf;
+        m_xfBuf = NULL;
+        m_xfSize = 0;
+        m_xfGot = 0;
+        m_xfMode = 0;
+        m_xfSeq = 1;
+        m_xfSave[0] = 0;
+    }
+
+    BOOL ReadWholeFile(const char* path, BYTE** out, int* outLen)
+    {
+        *out = NULL;
+        *outLen = 0;
+        if (path == NULL || path[0] == 0)
+        {
+            return FALSE;
+        }
+        FILE* f = NULL;
+        if (fopen_s(&f, path, "rb") != 0 || f == NULL)
+        {
+            return FALSE;
+        }
+        if (fseek(f, 0, SEEK_END) != 0)
+        {
+            fclose(f);
+            return FALSE;
+        }
+        long sz = ftell(f);
+        if (sz < 0 || sz > MAX_FILE)
+        {
+            fclose(f);
+            return FALSE;
+        }
+        if (fseek(f, 0, SEEK_SET) != 0)
+        {
+            fclose(f);
+            return FALSE;
+        }
+        BYTE* buf = NULL;
+        if (sz > 0)
+        {
+            buf = new BYTE[sz];
+            if (fread(buf, 1, (size_t)sz, f) != (size_t)sz)
+            {
+                delete[] buf;
+                fclose(f);
+                return FALSE;
+            }
+        }
+        fclose(f);
+        *out = buf;
+        *outLen = (int)sz;
+        return TRUE;
+    }
+
+    BOOL SaveWholeFile(const char* path, const BYTE* data, int len)
+    {
+        if (path == NULL || path[0] == 0)
+        {
+            return FALSE;
+        }
+        FILE* f = NULL;
+        if (fopen_s(&f, path, "wb") != 0 || f == NULL)
+        {
+            return FALSE;
+        }
+        BOOL ok = TRUE;
+        if (len > 0 && data != NULL)
+        {
+            ok = (fwrite(data, 1, (size_t)len, f) == (size_t)len);
+        }
+        fclose(f);
+        return ok;
+    }
+
+    BOOL ParseMemReq(const BYTE* pdu, int len, unsigned* addr, unsigned* size)
+    {
+        if (pdu == NULL || len < 3 || addr == NULL || size == NULL)
+        {
+            return FALSE;
+        }
+        int nAddr = pdu[2] & 0x0F;
+        int nSize = (pdu[2] >> 4) & 0x0F;
+        if (nAddr < 1 || nAddr > 4 || nSize < 1 || nSize > 4 || len < 3 + nAddr + nSize)
+        {
+            return FALSE;
+        }
+        unsigned a = 0;
+        unsigned s = 0;
+        for (int i = 0; i < nAddr; i++)
+        {
+            a = (a << 8) | pdu[3 + i];
+        }
+        for (int i = 0; i < nSize; i++)
+        {
+            s = (s << 8) | pdu[3 + nAddr + i];
+        }
+        *addr = a;
+        *size = s;
+        return TRUE;
+    }
+
+    void ReplyBlockSize(BYTE sid, unsigned char ch, OutAct& act, const char* log)
+    {
+        int dataBlock = m_xferBlock;
+        if (dataBlock < 1)
+        {
+            dataBlock = 128;
+        }
+        if (dataBlock > 4093)
+        {
+            dataBlock = 4093;
+        }
+        m_xfBlock = dataBlock;
+        unsigned maxMsg = (unsigned)dataBlock + 2;
+        BYTE resp[4];
+        resp[0] = sid;
+        resp[1] = 0x20;
+        resp[2] = (BYTE)((maxMsg >> 8) & 0xFF);
+        resp[3] = (BYTE)(maxMsg & 0xFF);
+        EmitResponse(resp, 4, ch, act, log);
+    }
+
+public:
+    void SetTransfer(BOOL on, unsigned addr, int block, const char* dl, const char* ul)
+    {
+        m_cs.Lock();
+        m_xferOn = on ? TRUE : FALSE;
+        m_xferAddr = addr;
+        if (block < 1)
+        {
+            block = 128;
+        }
+        if (block > 4093)
+        {
+            block = 4093;
+        }
+        m_xferBlock = block;
+        m_dlPath[0] = 0;
+        m_ulPath[0] = 0;
+        if (dl != NULL)
+        {
+            strncpy_s(m_dlPath, dl, _TRUNCATE);
+        }
+        if (ul != NULL)
+        {
+            strncpy_s(m_ulPath, ul, _TRUNCATE);
+        }
+        if (!m_xferOn)
+        {
+            FreeXfer();
+        }
+        m_cs.Unlock();
+    }
+
+    void GetTransfer(BOOL& on, unsigned& addr, int& block, CString& dl, CString& ul)
+    {
+        m_cs.Lock();
+        on = m_xferOn;
+        addr = m_xferAddr;
+        block = m_xferBlock;
+        dl = m_dlPath;
+        ul = m_ulPath;
+        m_cs.Unlock();
+    }
+
+    BOOL HandleTransfer(const BYTE* pdu, int len, unsigned char ch, OutAct& act)
+    {
+        if (!m_xferOn || pdu == NULL || len < 1)
+        {
+            return FALSE;
+        }
+        BYTE sid = pdu[0];
+        if (sid != 0x34 && sid != 0x35 && sid != 0x36 && sid != 0x37)
+        {
+            return FALSE;
+        }
+        if (sid == 0x34 || sid == 0x35)
+        {
+            unsigned addr = 0;
+            unsigned size = 0;
+            if (!ParseMemReq(pdu, len, &addr, &size) || size == 0 || size > (unsigned)MAX_FILE)
+            {
+                EmitNrc(sid, 0x13, ch, act, "RX transfer length is invalid");
+                return TRUE;
+            }
+            if (addr != m_xferAddr)
+            {
+                EmitNrc(sid, 0x31, ch, act, "RX transfer address is not configured");
+                return TRUE;
+            }
+            FreeXfer();
+            if (sid == 0x34)
+            {
+                if (m_dlPath[0] == 0)
+                {
+                    EmitNrc(sid, 0x31, ch, act, "RX download file is not configured");
+                    return TRUE;
+                }
+                m_xfBuf = new BYTE[size];
+                memset(m_xfBuf, 0, size);
+                m_xfSize = (int)size;
+                m_xfMode = 1;
+                m_xfSeq = 1;
+                strncpy_s(m_xfSave, m_dlPath, _TRUNCATE);
+                char log[120];
+                _snprintf(log, sizeof(log), "RX 34 addr %X size %u", addr, size);
+                log[sizeof(log) - 1] = 0;
+                ReplyBlockSize(0x74, ch, act, log);
+                return TRUE;
+            }
+            BYTE* file = NULL;
+            int fileLen = 0;
+            if (!ReadWholeFile(m_ulPath, &file, &fileLen) || fileLen < (int)size)
+            {
+                delete[] file;
+                EmitNrc(sid, 0x31, ch, act, "RX upload file is missing or too short");
+                return TRUE;
+            }
+            m_xfBuf = file;
+            m_xfSize = (int)size;
+            m_xfMode = 2;
+            m_xfSeq = 1;
+            char log[120];
+            _snprintf(log, sizeof(log), "RX 35 addr %X size %u", addr, size);
+            log[sizeof(log) - 1] = 0;
+            ReplyBlockSize(0x75, ch, act, log);
+            return TRUE;
+        }
+        if (m_xfMode == 0)
+        {
+            EmitNrc(sid, 0x24, ch, act, "RX transfer is not active");
+            return TRUE;
+        }
+        if (sid == 0x37)
+        {
+            if (m_xfMode == 1)
+            {
+                if (m_xfGot != m_xfSize || !SaveWholeFile(m_xfSave, m_xfBuf, m_xfGot))
+                {
+                    FreeXfer();
+                    EmitNrc(0x37, 0x72, ch, act, "RX 37 could not store the download");
+                    return TRUE;
+                }
+            }
+            int got = m_xfGot;
+            FreeXfer();
+            BYTE resp = 0x77;
+            char log[80];
+            _snprintf(log, sizeof(log), "RX 37 -> TX 77 (%d bytes)", got);
+            log[sizeof(log) - 1] = 0;
+            EmitResponse(&resp, 1, ch, act, log);
+            return TRUE;
+        }
+        if (len < 2)
+        {
+            EmitNrc(0x36, 0x13, ch, act, "RX 36 is too short");
+            return TRUE;
+        }
+        if (pdu[1] != (BYTE)(m_xfSeq & 0xFF))
+        {
+            EmitNrc(0x36, 0x73, ch, act, "RX 36 wrong block sequence");
+            return TRUE;
+        }
+        if (m_xfMode == 1)
+        {
+            int n = len - 2;
+            if (n > m_xfBlock || m_xfGot + n > m_xfSize)
+            {
+                FreeXfer();
+                EmitNrc(0x36, 0x13, ch, act, "RX 36 exceeds the download size");
+                return TRUE;
+            }
+            if (n > 0)
+            {
+                memcpy(m_xfBuf + m_xfGot, pdu + 2, n);
+                m_xfGot += n;
+            }
+            BYTE resp[2];
+            resp[0] = 0x76;
+            resp[1] = pdu[1];
+            char log[96];
+            _snprintf(log, sizeof(log), "RX 36 %02X -> TX 76 (%d / %d)", pdu[1], m_xfGot, m_xfSize);
+            log[sizeof(log) - 1] = 0;
+            EmitResponse(resp, 2, ch, act, log);
+            m_xfSeq = (m_xfSeq + 1) & 0xFF;
+            return TRUE;
+        }
+        int n = m_xfBlock;
+        if (n > m_xfSize - m_xfGot)
+        {
+            n = m_xfSize - m_xfGot;
+        }
+        if (n < 0)
+        {
+            n = 0;
+        }
+        BYTE* resp = new BYTE[2 + (n > 0 ? n : 0)];
+        resp[0] = 0x76;
+        resp[1] = pdu[1];
+        if (n > 0)
+        {
+            memcpy(resp + 2, m_xfBuf + m_xfGot, n);
+            m_xfGot += n;
+        }
+        char log[96];
+        _snprintf(log, sizeof(log), "RX 36 %02X -> TX 76 data %d (%d / %d)", pdu[1], n, m_xfGot, m_xfSize);
+        log[sizeof(log) - 1] = 0;
+        EmitResponse(resp, 2 + n, ch, act, log);
+        delete[] resp;
+        m_xfSeq = (m_xfSeq + 1) & 0xFF;
+        return TRUE;
+    }
+
     void OnPduLocked(const BYTE* pdu, int len, unsigned char ch, OutAct& act)
     {
         m_activeGen = InterlockedIncrement(&m_txGen);
@@ -2642,6 +3023,10 @@ private:
             return;
         }
         if (len >= 1 && pdu[0] == 0x2E && HandleWrite(pdu, len, ch, act))
+        {
+            return;
+        }
+        if (HandleTransfer(pdu, len, ch, act))
         {
             return;
         }
@@ -2902,6 +3287,7 @@ private:
             m_rxGot = n;
             m_rxExpect = len;
             m_rxSeq = 1;
+            m_rxCfInBlock = 0;
             m_rxCh = ch;
             if (m_rxGot >= m_rxExpect)
             {
@@ -2911,38 +3297,7 @@ private:
             else
             {
                 m_rxState = RX_MORE;
-                unsigned char useCh = (m_channel == 0) ? ch : (unsigned char)m_channel;
-                if (useCh == 0)
-                {
-                    useCh = 1;
-                }
-                memset(&act.frame, 0, sizeof(act.frame));
-                act.frame.m_unMsgID = m_respId;
-                act.frame.m_ucEXTENDED = m_ext ? 1 : 0;
-                act.frame.m_ucChannel = useCh;
-                int dlc = SizeFC;
-                if (g_udsCanFd)
-                {
-                    dlc = g_udsFdDlc;
-                    if (dlc < 8)
-                    {
-                        dlc = 8;
-                    }
-                    if (dlc > 64)
-                    {
-                        dlc = 64;
-                    }
-                    act.frame.m_bCANFD = true;
-                }
-                else if (dlc < 3 || dlc > 8)
-                {
-                    dlc = 8;
-                }
-                act.frame.m_ucDataLen = (unsigned char)dlc;
-                act.frame.m_ucData[0] = 0x30;
-                act.frame.m_ucData[1] = (BYTE)(BSize & 0xFF);
-                act.frame.m_ucData[2] = (BYTE)(SSTMin & 0xFF);
-                act.hasFrame = TRUE;
+                FillFlowControl(act, ch);
             }
             return;
         }
@@ -2956,12 +3311,17 @@ private:
             if (seq != m_rxSeq)
             {
                 m_rxState = RX_IDLE;
+                m_rxCfInBlock = 0;
                 _snprintf(act.log, sizeof(act.log), "ISO-TP sequence error");
                 act.log[sizeof(act.log) - 1] = 0;
                 return;
             }
             int remain = m_rxExpect - m_rxGot;
             int n = 7;
+            if (g_udsCanFd && dlc > 8)
+            {
+                n = dlc - 1;
+            }
             if (n > remain)
             {
                 n = remain;
@@ -2969,19 +3329,64 @@ private:
             if (n <= 0 || 1 + n > dlc)
             {
                 m_rxState = RX_IDLE;
+                m_rxCfInBlock = 0;
                 return;
             }
             memcpy(m_rx + m_rxGot, d + 1, n);
             m_rxGot += n;
             m_rxSeq = (m_rxSeq + 1) & 0x0F;
+            m_rxCfInBlock++;
             if (m_rxGot >= m_rxExpect)
             {
                 int got = m_rxExpect;
                 unsigned char rxCh = m_rxCh;
                 m_rxState = RX_IDLE;
+                m_rxCfInBlock = 0;
                 OnPduLocked(m_rx, got, rxCh, act);
             }
+            else if (BSize > 0 && m_rxCfInBlock >= BSize)
+            {
+                /* BS>0: after each block the receiver must send another FC. */
+                m_rxCfInBlock = 0;
+                FillFlowControl(act, m_rxCh);
+            }
         }
+    }
+
+    void FillFlowControl(OutAct& act, unsigned char ch)
+    {
+        unsigned char useCh = (m_channel == 0) ? ch : (unsigned char)m_channel;
+        if (useCh == 0)
+        {
+            useCh = 1;
+        }
+        memset(&act.frame, 0, sizeof(act.frame));
+        act.frame.m_unMsgID = m_respId;
+        act.frame.m_ucEXTENDED = m_ext ? 1 : 0;
+        act.frame.m_ucChannel = useCh;
+        int fdDlc = SizeFC;
+        if (g_udsCanFd)
+        {
+            fdDlc = g_udsFdDlc;
+            if (fdDlc < 8)
+            {
+                fdDlc = 8;
+            }
+            if (fdDlc > 64)
+            {
+                fdDlc = 64;
+            }
+            act.frame.m_bCANFD = true;
+        }
+        else if (fdDlc < 3 || fdDlc > 8)
+        {
+            fdDlc = 8;
+        }
+        act.frame.m_ucDataLen = (unsigned char)fdDlc;
+        act.frame.m_ucData[0] = 0x30;
+        act.frame.m_ucData[1] = (BYTE)(BSize & 0xFF);
+        act.frame.m_ucData[2] = (BYTE)(SSTMin & 0xFF);
+        act.hasFrame = TRUE;
     }
 
     static void StartTxThread(TxJob* job);
@@ -3000,6 +3405,7 @@ private:
     int m_rxExpect;
     int m_rxGot;
     int m_rxSeq;
+    int m_rxCfInBlock;
     unsigned char m_rxCh;
     int m_txState;
     BYTE m_tx[MAX_XFER];
@@ -3019,6 +3425,18 @@ private:
     unsigned int m_rng;
     BOOL m_unlocked;
     int m_keyFails;
+    BOOL m_xferOn;
+    unsigned m_xferAddr;
+    int m_xferBlock;
+    char m_dlPath[MAX_PATH];
+    char m_ulPath[MAX_PATH];
+    BYTE* m_xfBuf;
+    int m_xfSize;
+    int m_xfGot;
+    int m_xfMode;
+    int m_xfSeq;
+    int m_xfBlock;
+    char m_xfSave[MAX_PATH];
     CVectorSeedKeyDll m_seedDll;
     struct FileCache
     {
@@ -3353,6 +3771,8 @@ protected:
     afx_msg void OnDataChange();
     afx_msg void OnBrowseData();
     afx_msg void OnBrowseDll();
+    afx_msg void OnBrowseXferDl();
+    afx_msg void OnBrowseXferUl();
     afx_msg void OnSidChanged();
     afx_msg void OnHeaderChanged();
     afx_msg void OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
@@ -3401,6 +3821,13 @@ BEGIN_MESSAGE_MAP(CUDSServerWnd, CDialog)
     ON_EN_CHANGE(IDC_SVR_DATA, OnDataChange)
     ON_BN_CLICKED(IDC_SVR_BROWSE, OnBrowseData)
     ON_BN_CLICKED(IDC_SVR_DLLBROWSE, OnBrowseDll)
+    ON_BN_CLICKED(IDC_SVR_XFER, OnHeaderChanged)
+    ON_BN_CLICKED(IDC_SVR_XDLBROWSE, OnBrowseXferDl)
+    ON_BN_CLICKED(IDC_SVR_XULBROWSE, OnBrowseXferUl)
+    ON_EN_KILLFOCUS(IDC_SVR_XADDR, OnHeaderChanged)
+    ON_EN_KILLFOCUS(IDC_SVR_XBLOCK, OnHeaderChanged)
+    ON_EN_KILLFOCUS(IDC_SVR_XDL, OnHeaderChanged)
+    ON_EN_KILLFOCUS(IDC_SVR_XUL, OnHeaderChanged)
     ON_BN_CLICKED(IDC_SVR_ENABLE, OnHeaderChanged)
     ON_BN_CLICKED(IDC_SVR_UNLOCK, OnHeaderChanged)
     ON_BN_CLICKED(IDC_SVR_EXT, OnHeaderChanged)
@@ -3501,6 +3928,19 @@ void CUDSServerWnd::LoadHeader()
     SetDlgItemText(IDC_SVR_VARIANT, variant);
     SetDlgItemText(IDC_SVR_SEED, seed);
     SetDlgItemText(IDC_SVR_KEY, key);
+    BOOL xfer = FALSE;
+    unsigned xaddr = 0;
+    int block = 128;
+    CString xdl;
+    CString xul;
+    Engine().GetTransfer(xfer, xaddr, block, xdl, xul);
+    CheckDlgButton(IDC_SVR_XFER, xfer ? BST_CHECKED : BST_UNCHECKED);
+    text.Format("%X", xaddr);
+    SetDlgItemText(IDC_SVR_XADDR, text);
+    text.Format("%d", block);
+    SetDlgItemText(IDC_SVR_XBLOCK, text);
+    SetDlgItemText(IDC_SVR_XDL, xdl);
+    SetDlgItemText(IDC_SVR_XUL, xul);
 }
 
 void CUDSServerWnd::FillList(int selectIndex)
@@ -3680,6 +4120,41 @@ BOOL CUDSServerWnd::ApplyHeader()
     }
     Engine().SetHeader(enable, channel, req, resp, ext);
     Engine().SetSecurity(unlock, level, seedAlgo, keyAlgo, (LPCTSTR)dll, (LPCTSTR)variant, seed, seedLen, key, keyLen);
+    BOOL xfer = (IsDlgButtonChecked(IDC_SVR_XFER) == BST_CHECKED);
+    CString addrText;
+    CString blockText;
+    CString xdl;
+    CString xul;
+    GetDlgItemText(IDC_SVR_XADDR, addrText);
+    GetDlgItemText(IDC_SVR_XBLOCK, blockText);
+    GetDlgItemText(IDC_SVR_XDL, xdl);
+    GetDlgItemText(IDC_SVR_XUL, xul);
+    addrText.Trim();
+    blockText.Trim();
+    xdl.Trim();
+    xul.Trim();
+    unsigned xaddr = 0;
+    if (!addrText.IsEmpty())
+    {
+        char* end = NULL;
+        xaddr = strtoul((LPCTSTR)addrText, &end, 16);
+        if (end == (char*)(LPCTSTR)addrText || end == NULL || *end != 0)
+        {
+            SetDlgItemText(IDC_SVR_STATUS, "Transfer address must be hex");
+            return FALSE;
+        }
+    }
+    int block = 128;
+    if (!blockText.IsEmpty())
+    {
+        block = atoi((LPCTSTR)blockText);
+    }
+    if (block < 1 || block > 4093)
+    {
+        SetDlgItemText(IDC_SVR_STATUS, "Block bytes must be 1..4093");
+        return FALSE;
+    }
+    Engine().SetTransfer(xfer, xaddr, block, (LPCTSTR)xdl, (LPCTSTR)xul);
     return TRUE;
 }
 
@@ -3871,6 +4346,36 @@ void CUDSServerWnd::OnBrowseDll()
         return;
     }
     SetDlgItemText(IDC_SVR_DLL, dlg.GetPathName());
+    if (m_bReady)
+    {
+        ApplyHeader();
+    }
+}
+
+void CUDSServerWnd::OnBrowseXferDl()
+{
+    CFileDialog dlg(FALSE, "bin", NULL, OFN_HIDEREADONLY | OFN_OVERWRITEPROMPT,
+                    "Binary (*.bin)|*.bin|All files (*.*)|*.*||", this);
+    if (dlg.DoModal() != IDOK)
+    {
+        return;
+    }
+    SetDlgItemText(IDC_SVR_XDL, dlg.GetPathName());
+    if (m_bReady)
+    {
+        ApplyHeader();
+    }
+}
+
+void CUDSServerWnd::OnBrowseXferUl()
+{
+    CFileDialog dlg(TRUE, "bin", NULL, OFN_FILEMUSTEXIST | OFN_HIDEREADONLY,
+                    "Binary (*.bin)|*.bin|All files (*.*)|*.*||", this);
+    if (dlg.DoModal() != IDOK)
+    {
+        return;
+    }
+    SetDlgItemText(IDC_SVR_XUL, dlg.GetPathName());
     if (m_bReady)
     {
         ApplyHeader();

@@ -228,6 +228,7 @@ public:
     afx_msg BOOL PreTranslateMessage(MSG* pMsg);
     afx_msg LRESULT OnCommandHelp ( WPARAM wParam, LPARAM lParam );
     afx_msg LRESULT OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnContinueCf(WPARAM wParam, LPARAM lParam);
     afx_msg void OnDestroy();
     afx_msg void OnTvnSelchangedServices(NMHDR* pNMHDR, LRESULT* pResult);
     afx_msg void OnBnClickedAdd();
