@@ -53,10 +53,10 @@ protected:
 
     void Log(const CString& text);
     void SetBusy(BOOL busy);
-    BOOL ReadUi(unsigned& addr, int& addrN, int& sizeN, BYTE& dfi, int& cap, unsigned& upSize);
+    BOOL ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi, int& cap, unsigned& upSize);
     BOOL LoadFile(const CString& path);
     void FreeFile();
-    CString Be(unsigned value, int n);
+    CString Be(ULONGLONG value, int n);
     CString HexOf(const BYTE* data, int n);
     BOOL SendHex(const CString& hex);
     BOOL TakeResponse();
@@ -79,7 +79,7 @@ protected:
     DWORD m_blockT0;
     BYTE m_rsp[8192];
     int m_rspLen;
-    unsigned m_addr;
+    ULONGLONG m_addr;
     int m_addrN;
     int m_sizeN;
     BYTE m_dfi;
@@ -106,7 +106,7 @@ BOOL CUDSTransferWnd::OnInitDialog()
     SetDlgItemText(IDC_XFER_BLOCK, "0");
     CComboBox* pAddr = (CComboBox*)GetDlgItem(IDC_XFER_ALEN);
     CComboBox* pLen = (CComboBox*)GetDlgItem(IDC_XFER_LLEN);
-    for (int n = 1; n <= 4; n++)
+    for (int n = 1; n <= 8; n++)
     {
         CString text;
         text.Format("%d", n);
@@ -121,11 +121,11 @@ BOOL CUDSTransferWnd::OnInitDialog()
     }
     if (pAddr != NULL)
     {
-        pAddr->SetCurSel(3);
+        pAddr->SetCurSel(3); /* default 4 */
     }
     if (pLen != NULL)
     {
-        pLen->SetCurSel(3);
+        pLen->SetCurSel(3); /* default 4 */
     }
     SetDlgItemText(IDC_XFER_STATUS, "Download sends 34/36/37. Upload sends 35/36/37. Open this page after Connect.");
     UpdateProgress(0, 0);
@@ -238,13 +238,21 @@ void CUDSTransferWnd::FreeFile()
     m_fileLen = 0;
 }
 
-CString CUDSTransferWnd::Be(unsigned value, int n)
+CString CUDSTransferWnd::Be(ULONGLONG value, int n)
 {
     CString text;
+    if (n < 1)
+    {
+        n = 1;
+    }
+    if (n > 8)
+    {
+        n = 8;
+    }
     for (int i = n - 1; i >= 0; i--)
     {
         CString one;
-        one.Format("%02X", (value >> (8 * i)) & 0xFF);
+        one.Format("%02X", (unsigned)((value >> (8 * i)) & 0xFF));
         text += one;
     }
     return text;
@@ -266,7 +274,7 @@ CString CUDSTransferWnd::HexOf(const BYTE* data, int n)
     return text;
 }
 
-BOOL CUDSTransferWnd::ReadUi(unsigned& addr, int& addrN, int& sizeN, BYTE& dfi, int& cap, unsigned& upSize)
+BOOL CUDSTransferWnd::ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi, int& cap, unsigned& upSize)
 {
     CString text;
     GetDlgItemText(IDC_XFER_ADDR, text);
@@ -277,7 +285,7 @@ BOOL CUDSTransferWnd::ReadUi(unsigned& addr, int& addrN, int& sizeN, BYTE& dfi, 
         text = text.Mid(2);
     }
     char* end = NULL;
-    addr = strtoul((LPCTSTR)text, &end, 16);
+    addr = _strtoui64((LPCTSTR)text, &end, 16);
     if (text.IsEmpty() || end == NULL || *end != 0)
     {
         SetDlgItemText(IDC_XFER_STATUS, "Address must be hex");
@@ -287,16 +295,16 @@ BOOL CUDSTransferWnd::ReadUi(unsigned& addr, int& addrN, int& sizeN, BYTE& dfi, 
     CComboBox* pLen = (CComboBox*)GetDlgItem(IDC_XFER_LLEN);
     addrN = (pAddr != NULL) ? pAddr->GetCurSel() + 1 : 4;
     sizeN = (pLen != NULL) ? pLen->GetCurSel() + 1 : 4;
-    if (addrN < 1 || addrN > 4)
+    if (addrN < 1 || addrN > 8)
     {
         addrN = 4;
     }
-    if (sizeN < 1 || sizeN > 4)
+    if (sizeN < 1 || sizeN > 8)
     {
         sizeN = 4;
     }
-    unsigned addrMax = (addrN >= 4) ? 0xFFFFFFFF : ((1u << (addrN * 8)) - 1u);
-    if (addrN < 4 && addr > addrMax)
+    ULONGLONG addrMax = (addrN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (addrN * 8)) - 1ull);
+    if (addr > addrMax)
     {
         SetDlgItemText(IDC_XFER_STATUS, "Address does not fit in the address field");
         return FALSE;
@@ -733,15 +741,15 @@ void CUDSTransferWnd::OnDownload()
         }
         return;
     }
-    unsigned sizeMax = (m_sizeN >= 4) ? 0xFFFFFFFF : ((1u << (m_sizeN * 8)) - 1u);
-    if ((unsigned)m_fileLen > sizeMax)
+    ULONGLONG sizeMax = (m_sizeN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (m_sizeN * 8)) - 1ull);
+    if ((ULONGLONG)m_fileLen > sizeMax)
     {
         SetDlgItemText(IDC_XFER_STATUS, "File length does not fit in the size field");
         return;
     }
     CString req;
     req.Format("34%02X%02X%s%s", m_dfi, (m_sizeN << 4) | m_addrN,
-               (LPCTSTR)Be(m_addr, m_addrN), (LPCTSTR)Be((unsigned)m_fileLen, m_sizeN));
+               (LPCTSTR)Be(m_addr, m_addrN), (LPCTSTR)Be((ULONGLONG)m_fileLen, m_sizeN));
     Log("34 " + req);
     m_off = 0;
     UpdateProgress(0, m_fileLen);
@@ -771,8 +779,8 @@ void CUDSTransferWnd::OnUpload()
         SetDlgItemText(IDC_XFER_STATUS, "Upload size must be 1 byte to 16 MB");
         return;
     }
-    unsigned sizeMax = (m_sizeN >= 4) ? 0xFFFFFFFF : ((1u << (m_sizeN * 8)) - 1u);
-    if (upSize > sizeMax)
+    ULONGLONG sizeMax = (m_sizeN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (m_sizeN * 8)) - 1ull);
+    if ((ULONGLONG)upSize > sizeMax)
     {
         SetDlgItemText(IDC_XFER_STATUS, "Upload size does not fit in the size field");
         return;

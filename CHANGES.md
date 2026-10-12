@@ -430,7 +430,7 @@ Diagnostics 菜单和 Ribbon 上增加 **Diagnostic Server**。在这个窗口�
 
 **Transfer Test**
 
-Diagnostics 菜单增加 **Transfer Test**：按 `34/36/37` 下载、`35/36/37` 上传，带进度条、百分比，以及每个 `36` 块的开始/结束时间戳。
+Diagnostics 菜单增加 **Transfer Test**：按 `34/36/37` 下载、`35/36/37` 上传，带进度条、百分比，以及每个 `36` 块的开始/结束时间戳。Addr bytes / Size bytes 可选 **1～8**（默认 4），支持最长 64 位地址与长度字段。
 
 **诊断服务端 ISO-TP**
 
