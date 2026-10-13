@@ -1009,6 +1009,20 @@ HRESULT CDIL_CAN_STUB::CAN_GetErrorCount(SERROR_CNT& sErrorCnt, UINT /* nChannel
     return S_OK;
 }
 
+static void vSetUserClassString(const char* pcSubKey, const char* pcName, const char* pcValue)
+{
+    HKEY key = nullptr;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, pcSubKey, 0, nullptr, 0, KEY_SET_VALUE,
+                        nullptr, &key, nullptr) == ERROR_SUCCESS)
+    {
+        RegSetValueExA(key, pcName, 0, REG_SZ, (const BYTE*)pcValue, (DWORD)(strlen(pcValue) + 1));
+        RegCloseKey(key);
+    }
+}
+
+/* ISimENG is marshalled across processes by the type library marshaler, so
+   besides LocalServer32 the interface and its type library must be
+   registered too; without them CoCreateInstance returns E_NOINTERFACE. */
 static void vBindLocalSimulationServer(void)
 {
     char exePath[MAX_PATH];
@@ -1032,14 +1046,23 @@ static void vBindLocalSimulationServer(void)
     }
     char quoted[MAX_PATH + 3];
     sprintf_s(quoted, "\"%s\"", exePath);
-    HKEY key = nullptr;
-    if (RegCreateKeyExA(HKEY_CURRENT_USER,
-                        "Software\\Classes\\CLSID\\{5983045C-CA05-47CF-8CD8-86A4445FB48C}\\LocalServer32",
-                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS)
-    {
-        RegSetValueExA(key, nullptr, 0, REG_SZ, (const BYTE*)quoted, (DWORD)(strlen(quoted) + 1));
-        RegCloseKey(key);
-    }
+    vSetUserClassString("Software\\Classes\\CLSID\\{5983045C-CA05-47CF-8CD8-86A4445FB48C}\\LocalServer32",
+                        nullptr, quoted);
+
+    const char* pcIface = "Software\\Classes\\Interface\\{32610836-D66A-4A57-83D5-EA50ECB0B7BB}";
+    const char* pcLib = "Software\\Classes\\TypeLib\\{1C499499-5718-4CB9-BEE9-6E3FEF24F5C7}\\1.1";
+    char subKey[256];
+    vSetUserClassString(pcIface, nullptr, "ISimENG");
+    sprintf_s(subKey, "%s\\ProxyStubClsid32", pcIface);
+    vSetUserClassString(subKey, nullptr, "{00020424-0000-0000-C000-000000000046}");
+    sprintf_s(subKey, "%s\\TypeLib", pcIface);
+    vSetUserClassString(subKey, nullptr, "{1C499499-5718-4CB9-BEE9-6E3FEF24F5C7}");
+    vSetUserClassString(subKey, "Version", "1.1");
+    vSetUserClassString(pcLib, nullptr, "BusEmulation 1.1 Type Library");
+    sprintf_s(subKey, "%s\\0\\win32", pcLib);
+    vSetUserClassString(subKey, nullptr, exePath);
+    sprintf_s(subKey, "%s\\FLAGS", pcLib);
+    vSetUserClassString(subKey, nullptr, "0");
 }
 
 DWORD WINAPI BrokerThreadBusEmulation(LPVOID pVoid)
