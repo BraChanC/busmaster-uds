@@ -111,4 +111,8 @@ static char SectionName[SECTION_TOTAL][MAX_PATH] =
 #define DEF_CHANNEL                     "Channel"
 
 #define DEF_LIN_CLUSTER_CONFIG      "LIN_Cluster_Config"
+
+#define DEF_UDS_SETTINGS                "UDS_Settings"
+#define DEF_UDS_STMIN                   "STmin"
+#define DEF_UDS_BS                      "BS"
 // XML GENERATION DEFINES END

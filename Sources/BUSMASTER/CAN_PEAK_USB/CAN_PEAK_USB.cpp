@@ -83,6 +83,178 @@ static STCAN_MSG sg_asLastTx[MAX_PEAK_CHANNELS];
 static BOOL sg_abLastTxValid[MAX_PEAK_CHANNELS] = {0};
 static LARGE_INTEGER sg_alnLastTxQpc[MAX_PEAK_CHANNELS] = {0};
 
+/* TX backlog limiter. CAN_Write returns OK once a frame is in the driver
+   queue; with hundreds of frames queued at once (ISO-TP STmin=0) frames were
+   observed missing on the bus. Track when the bus will have sent everything
+   already submitted and keep at most PEAK_TX_BACKLOG_FRAMES ahead of it. */
+#define PEAK_TX_BACKLOG_FRAMES 2
+#define PEAK_TX_MARGIN_BITS    3
+
+static CRITICAL_SECTION sg_csTxPace;
+static BOOL sg_bTxPaceInit = FALSE;
+static DWORD sg_adwNomBps[MAX_PEAK_CHANNELS] = {0};
+static double sg_adTxBusFreeUs[MAX_PEAK_CHANNELS] = {0};
+
+static double dNowUs(void)
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    LONGLONG f = sg_lnFrequency.QuadPart != 0 ? sg_lnFrequency.QuadPart : 1;
+    return (double)now.QuadPart * 1000000.0 / (double)f;
+}
+
+/* Exact bit count of a classic CAN data frame on the wire, including stuff
+   bits, CRC delimiter, ACK, EOF and the 3-bit intermission. */
+static int nClassicFrameBits(UINT unId, BOOL bExt, BOOL bRtr, const BYTE* pucData, int nLen)
+{
+    BYTE aucBits[160];
+    int n = 0;
+    aucBits[n++] = 0;
+    if (bExt)
+    {
+        for (int i = 28; i >= 18; i--) { aucBits[n++] = (BYTE)((unId >> i) & 1); }
+        aucBits[n++] = 1;
+        aucBits[n++] = 1;
+        for (int i = 17; i >= 0; i--) { aucBits[n++] = (BYTE)((unId >> i) & 1); }
+        aucBits[n++] = bRtr ? 1 : 0;
+        aucBits[n++] = 0;
+        aucBits[n++] = 0;
+    }
+    else
+    {
+        for (int i = 10; i >= 0; i--) { aucBits[n++] = (BYTE)((unId >> i) & 1); }
+        aucBits[n++] = bRtr ? 1 : 0;
+        aucBits[n++] = 0;
+        aucBits[n++] = 0;
+    }
+    for (int i = 3; i >= 0; i--) { aucBits[n++] = (BYTE)((nLen >> i) & 1); }
+    if (!bRtr)
+    {
+        for (int k = 0; k < nLen; k++)
+        {
+            for (int i = 7; i >= 0; i--) { aucBits[n++] = (BYTE)((pucData[k] >> i) & 1); }
+        }
+    }
+    unsigned int crc = 0;
+    for (int k = 0; k < n; k++)
+    {
+        unsigned int nxt = aucBits[k] ^ ((crc >> 14) & 1);
+        crc = (crc << 1) & 0x7FFF;
+        if (nxt)
+        {
+            crc ^= 0x4599;
+        }
+    }
+    for (int i = 14; i >= 0; i--) { aucBits[n++] = (BYTE)((crc >> i) & 1); }
+    int nStuff = 0;
+    int nRun = 1;
+    BYTE ucPrev = aucBits[0];
+    for (int k = 1; k < n; k++)
+    {
+        if (aucBits[k] == ucPrev)
+        {
+            if (++nRun == 5)
+            {
+                nStuff++;
+                ucPrev = (BYTE)(1 - ucPrev);
+                nRun = 1;
+            }
+        }
+        else
+        {
+            ucPrev = aucBits[k];
+            nRun = 1;
+        }
+    }
+    return n + nStuff + 1 + 2 + 7 + 3;
+}
+
+static double dFrameUs(int nIndex, const STCAN_MSG& sMsg)
+{
+    double dNom = (double)sg_adwNomBps[nIndex];
+    if (sMsg.m_bCANFD)
+    {
+        /* Arbitration and trailer at nominal rate, data phase at data rate
+           (BRS), with a 20% allowance for stuff bits. */
+        double dData = sg_aunDataBitRate[nIndex] ? (double)sg_aunDataBitRate[nIndex] : dNom;
+        double dDataBits = ((double)sMsg.m_ucDataLen * 8.0 + 28.0) * 1.2;
+        return (40.0 + PEAK_TX_MARGIN_BITS) * 1000000.0 / dNom + dDataBits * 1000000.0 / dData;
+    }
+    int nLen = sMsg.m_ucDataLen > 8 ? 8 : sMsg.m_ucDataLen;
+    int nBits = nClassicFrameBits(sMsg.m_unMsgID, sMsg.m_ucEXTENDED ? TRUE : FALSE,
+                                  sMsg.m_ucRTR ? TRUE : FALSE, sMsg.m_ucData, nLen);
+    return (double)(nBits + PEAK_TX_MARGIN_BITS) * 1000000.0 / dNom;
+}
+
+static DWORD dwBpsFromBaudCode(TPCANBaudrate baud)
+{
+    switch ((unsigned)baud)
+    {
+        case 0x0014: return 1000000;
+        case 0x0016: return 800000;
+        case 0x001C: return 500000;
+        case 0x011C: return 250000;
+        case 0x031C: return 125000;
+        case 0x432F: return 100000;
+        case 0xC52F: return 95000;
+        case 0x4914: return 83000;
+        case 0x472F: return 50000;
+        case 0x1414: return 47000;
+        case 0x8B2F: return 33000;
+        case 0x532F: return 20000;
+        case 0x672F: return 10000;
+        case 0x7F7F: return 5000;
+        default: return 0;
+    }
+}
+
+/* Blocks only while more than PEAK_TX_BACKLOG_FRAMES are estimated to be
+   waiting in the driver; sporadic transmissions never wait. */
+static void vTxPaceWait(int nIndex, double dUs)
+{
+    if (!sg_bTxPaceInit || sg_adwNomBps[nIndex] == 0)
+    {
+        return;
+    }
+    double dLimit = dUs * PEAK_TX_BACKLOG_FRAMES;
+    for (;;)
+    {
+        EnterCriticalSection(&sg_csTxPace);
+        double dAhead = sg_adTxBusFreeUs[nIndex] - dNowUs();
+        LeaveCriticalSection(&sg_csTxPace);
+        double dWait = dAhead - dLimit;
+        if (dWait <= 0)
+        {
+            return;
+        }
+        if (dWait > 2000.0)
+        {
+            Sleep(1);
+        }
+        else if (dWait > 100.0)
+        {
+            SwitchToThread();
+        }
+        else
+        {
+            YieldProcessor();
+        }
+    }
+}
+
+static void vTxPaceCommit(int nIndex, double dUs)
+{
+    if (!sg_bTxPaceInit || sg_adwNomBps[nIndex] == 0)
+    {
+        return;
+    }
+    EnterCriticalSection(&sg_csTxPace);
+    double dNow = dNowUs();
+    double dStart = sg_adTxBusFreeUs[nIndex] > dNow ? sg_adTxBusFreeUs[nIndex] : dNow;
+    sg_adTxBusFreeUs[nIndex] = dStart + dUs;
+    LeaveCriticalSection(&sg_csTxPace);
+}
+
 static void RememberTx(int nChannelIndex, const STCAN_MSG& sMsg)
 {
     if (nChannelIndex < 0 || nChannelIndex >= MAX_PEAK_CHANNELS)
@@ -752,6 +924,11 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_PerformInitOperations(void)
         InitializeCriticalSection(&sg_DIL_CriticalSection);
         sg_bCsInit = TRUE;
     }
+    if (!sg_bTxPaceInit)
+    {
+        InitializeCriticalSection(&sg_csTxPace);
+        sg_bTxPaceInit = TRUE;
+    }
     DWORD dwClientID = 0;
     CAN_RegisterClient(TRUE, dwClientID, CAN_MONITOR_NODE);
     return S_OK;
@@ -768,6 +945,11 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_PerformClosureOperations(void)
     {
         DeleteCriticalSection(&sg_DIL_CriticalSection);
         sg_bCsInit = FALSE;
+    }
+    if (sg_bTxPaceInit)
+    {
+        sg_bTxPaceInit = FALSE;
+        DeleteCriticalSection(&sg_csTxPace);
     }
     sg_bCurrState = STATE_DRIVER_SELECTED;
     return S_OK;
@@ -969,6 +1151,16 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_StartHardware(void)
         {
             DWORD dwEchoOff = PCAN_PARAMETER_OFF;
             sg_CAN_SetValue(sg_anHandles[i], PCAN_ALLOW_ECHO_FRAMES, &dwEchoOff, sizeof(dwEchoOff));
+            DWORD dwBps = 0;
+            TPCANStatus stBps = sg_CAN_GetValue != nullptr
+                                ? sg_CAN_GetValue(sg_anHandles[i], PCAN_BUSSPEED_NOMINAL, &dwBps, sizeof(dwBps))
+                                : (TPCANStatus)PCAN_ERROR_ILLOPERATION;
+            if (stBps != PCAN_ERROR_OK || dwBps == 0)
+            {
+                dwBps = dwBpsFromBaudCode(sg_Baud);
+            }
+            sg_adwNomBps[i] = dwBps;
+            sg_adTxBusFreeUs[i] = 0;
         }
     }
 
@@ -1036,6 +1228,8 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTx
         return ERR_INVALID_CHANNEL;
     }
 
+    double dTxUs = sg_adwNomBps[nIndex] != 0 ? dFrameUs(nIndex, sCanTxMsg) : 0.0;
+    vTxPaceWait(nIndex, dTxUs);
     TPCANStatus st;
     if (sg_abCanFd[nIndex] && sg_CAN_WriteFD != nullptr)
     {
@@ -1066,6 +1260,7 @@ HRESULT CDIL_CAN_PEAK_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTx
     {
         return S_FALSE;
     }
+    vTxPaceCommit(nIndex, dTxUs);
 
     STCANDATA can_data;
     memset(&can_data, 0, sizeof(can_data));

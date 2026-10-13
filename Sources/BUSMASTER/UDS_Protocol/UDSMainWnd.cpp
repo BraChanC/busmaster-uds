@@ -11,59 +11,21 @@
 #include "UDSMainWnd.h"
 #include "UDSSettingsWnd.h"
 #include "UDS_Resource.h"
+#include "UDS_Extern.h"
 #include "BaseDIL_CAN.h"
 #include "ProtocolsDefinitions.h"
 #include "UDSIso14229.h"
 #include "IBusMasterKernel.h"
 #include <afxdlgs.h>
+#include <process.h>
 CUDSMainWnd* CUDSMainWnd::m_spodInstance = NULL;
 extern CUDSMainWnd* omMainWnd;
+extern int P2_Time;
 extern "C" HRESULT EvaluateMessage(STCAN_MSG Mensaje);
 
 BOOL FWait_SendingFrame=FALSE;
 /** This variable is used to indicate that the system should wait for a flow control */
 bool FWaitFlow = FALSE;
-static int s_cfBlockCount = 0;
-static int s_cfBusy = 0;
-/* After FC / FF, first CF needs no extra gap; later CFs honor STMin. */
-static int s_cfNeedGap = 0;
-
-/* STMin==0 still needs a tiny gap: USB adapters (PCAN) drop when CF is blasted
-   with PostMessage and zero delay. 300 us is near one classic CAN frame and
-   keeps 1 MiB in about a minute instead of tens of minutes from SetTimer(1). */
-static void PaceNextCfGap(int stMinMs)
-{
-    static LARGE_INTEGER s_freq = {0};
-    if (s_freq.QuadPart == 0)
-    {
-        QueryPerformanceFrequency(&s_freq);
-        if (s_freq.QuadPart == 0)
-        {
-            return;
-        }
-    }
-    LONGLONG needTicks;
-    if (stMinMs <= 0)
-    {
-        needTicks = s_freq.QuadPart / 3333; /* ~300 us */
-    }
-    else
-    {
-        needTicks = (s_freq.QuadPart * (LONGLONG)stMinMs) / 1000;
-    }
-    if (needTicks <= 0)
-    {
-        return;
-    }
-    LARGE_INTEGER t0;
-    LARGE_INTEGER t1;
-    QueryPerformanceCounter(&t0);
-    do
-    {
-        QueryPerformanceCounter(&t1);
-    }
-    while ((t1.QuadPart - t0.QuadPart) < needTicks);
-}
 bool FlagTP = FALSE;
 int Counter_BSize;
 BOOL g_bStopSelectedMsgTx = TRUE;
@@ -74,6 +36,351 @@ double c_dDiffTime = 0;
 int S3_Client = 2000;
 int S3_Server = 5000;
 long Font_Color = RGB(69, 96,200) ;
+
+/* Consecutive frames of a long request are sent by a worker thread so the UI
+   thread never spins on STmin. The read thread starts one worker per Flow
+   Control (CTS); the UI only gets WM_UDS_CLI_TX_DONE at the end. */
+#define CLI_TX_RETRY_MS     1000
+/* STmin=0: CF submit period = worst-case (max stuffing) bus time of one CF
+   at the channel bit rate, plus CLI_TX_MARGIN_PCT, so the adapter queue does
+   not fill up. 500 kbit/s classic 11-bit 8-byte: 270 us -> 351 us.
+   10% (297 us) lost a CF block on VC02C -> PCAN at block 26 of 1 MB. */
+#define CLI_TX_MARGIN_PCT   30
+#define CLI_TX_MIN_US       50
+#define CLI_TX_DEF_BPS      500000u
+#define CLI_TX_MAX_CH       32
+#define UDS_LOG_LIMIT       (1024u * 1024u)
+#define UDS_LOG_KEEP        (256 * 1024)
+#define UDS_LOG_DATA_CHARS  64
+#define UDS_WAIT_RSP_TEXT   "     Waiting for response..."
+#define UDS_NO_RSP_TEXT     "     No Response Received"
+
+extern BOOL g_udsCanFd;
+
+struct SCliTx
+{
+    CRITICAL_SECTION cs;
+    BOOL bInit;
+    BYTE* pData;
+    int nLen;
+    int nOff;
+    int nSn;
+    STCAN_MSG sTmpl;
+    int nPci;
+    int nDlc;
+    int nCfBytes;
+    BYTE ucLastSt;
+    HWND hNotify;
+    volatile LONG lGen;
+    volatile LONG lBusy;
+    volatile LONG lRunning;
+};
+static SCliTx g_sCliTx;
+
+struct SCliTxJob
+{
+    LONG lGen;
+    int nBs;
+    int nStUs;
+};
+
+static void CliTxInit(void)
+{
+    if (!g_sCliTx.bInit)
+    {
+        InitializeCriticalSection(&g_sCliTx.cs);
+        g_sCliTx.bInit = TRUE;
+    }
+}
+
+static volatile UINT g_aunCliNomBps[CLI_TX_MAX_CH];
+static volatile UINT g_aunCliDataBps[CLI_TX_MAX_CH];
+static volatile LONG g_alCliFd[CLI_TX_MAX_CH];
+
+void UdsClientSetChannelBitrate(int channel, UINT nominalBps, UINT dataBps, BOOL canFd)
+{
+    if (channel < 1 || channel > CLI_TX_MAX_CH)
+    {
+        return;
+    }
+    /* Some drivers keep the rate in kbit/s. */
+    if (nominalBps > 0 && nominalBps < 10000)
+    {
+        nominalBps *= 1000;
+    }
+    if (dataBps > 0 && dataBps < 10000)
+    {
+        dataBps *= 1000;
+    }
+    g_aunCliNomBps[channel - 1] = nominalBps;
+    g_aunCliDataBps[channel - 1] = dataBps;
+    g_alCliFd[channel - 1] = canFd ? 1 : 0;
+}
+
+/* Worst-case bus time of one frame with nData payload bytes. Bit counts
+   include the maximum number of dynamic stuff bits and the 3-bit IFS. */
+static int CliTxFrameUs(const STCAN_MSG& sTmpl, int nData)
+{
+    int ch = (int)sTmpl.m_ucChannel;
+    UINT nom = 0;
+    UINT data = 0;
+    BOOL bFdCh = FALSE;
+    if (ch >= 1 && ch <= CLI_TX_MAX_CH)
+    {
+        nom = g_aunCliNomBps[ch - 1];
+        data = g_aunCliDataBps[ch - 1];
+        bFdCh = g_alCliFd[ch - 1] != 0;
+    }
+    if (nom == 0)
+    {
+        nom = CLI_TX_DEF_BPS;
+    }
+    BOOL bExt = sTmpl.m_ucEXTENDED ? TRUE : FALSE;
+    double us;
+    if (!sTmpl.m_bCANFD)
+    {
+        int nStuffed = (bExt ? 54 : 34) + 8 * nData;
+        int nBits = (bExt ? 67 : 47) + 8 * nData + (nStuffed - 1) / 4;
+        us = (double)nBits * 1000000.0 / (double)nom;
+    }
+    else
+    {
+        /* Arbitration and ACK/EOF/IFS at the nominal rate, the rest at the
+           data rate (BRS). No data rate configured -> nominal rate. */
+        if (!bFdCh || data == 0)
+        {
+            data = nom;
+        }
+        int nArb = bExt ? 36 : 17;
+        int nNomBits = nArb + (nArb - 1) / 4 + 13;
+        int nCrc = (nData <= 16) ? 17 : 21;
+        int nDataBits = 5 + 8 * nData + (5 + 8 * nData) / 4 + 4 + nCrc + (4 + nCrc + 3) / 4;
+        us = (double)nNomBits * 1000000.0 / (double)nom + (double)nDataBits * 1000000.0 / (double)data;
+    }
+    int nUs = (int)(us * (100 + CLI_TX_MARGIN_PCT) / 100.0 + 0.999);
+    return nUs < CLI_TX_MIN_US ? CLI_TX_MIN_US : nUs;
+}
+
+static int CliTxDecodeStUs(BYTE s)
+{
+    if (s <= 0x7F)
+    {
+        return (int)s * 1000;
+    }
+    if (s >= 0xF1 && s <= 0xF9)
+    {
+        return (int)(s - 0xF0) * 100;
+    }
+    return 127000;
+}
+
+BOOL UdsClientTxBusy()
+{
+    return g_sCliTx.lBusy != 0;
+}
+
+void UdsClientTxCancel()
+{
+    CliTxInit();
+    EnterCriticalSection(&g_sCliTx.cs);
+    InterlockedIncrement(&g_sCliTx.lGen);
+    InterlockedExchange(&g_sCliTx.lBusy, 0);
+    delete[] g_sCliTx.pData;
+    g_sCliTx.pData = NULL;
+    g_sCliTx.nLen = 0;
+    g_sCliTx.nOff = 0;
+    LeaveCriticalSection(&g_sCliTx.cs);
+}
+
+static void CliTxArm(const CString& omHexRest, const STCAN_MSG& sFf, int nPci, int nDlc, int nCfBytes, HWND hNotify)
+{
+    CliTxInit();
+    int nLen = omHexRest.GetLength() / 2;
+    BYTE* pData = new BYTE[nLen > 0 ? nLen : 1];
+    for (int i = 0; i < nLen; i++)
+    {
+        char ach[3] = { (char)omHexRest[i * 2], (char)omHexRest[i * 2 + 1], 0 };
+        pData[i] = (BYTE)strtoul(ach, NULL, 16);
+    }
+    EnterCriticalSection(&g_sCliTx.cs);
+    InterlockedIncrement(&g_sCliTx.lGen);
+    delete[] g_sCliTx.pData;
+    g_sCliTx.pData = pData;
+    g_sCliTx.nLen = nLen;
+    g_sCliTx.nOff = 0;
+    g_sCliTx.nSn = 1;
+    g_sCliTx.sTmpl = sFf;
+    g_sCliTx.nPci = nPci;
+    g_sCliTx.nDlc = nDlc;
+    g_sCliTx.nCfBytes = nCfBytes;
+    g_sCliTx.hNotify = hNotify;
+    InterlockedExchange(&g_sCliTx.lBusy, nLen > 0 ? 1 : 0);
+    LeaveCriticalSection(&g_sCliTx.cs);
+}
+
+static unsigned __stdcall CliTxThread(void* pParam)
+{
+    SCliTxJob* pJob = (SCliTxJob*)pParam;
+    LARGE_INTEGER qpf, qLast, qNow;
+    QueryPerformanceFrequency(&qpf);
+    qLast.QuadPart = 0;
+    int nStUs = pJob->nStUs;
+    if (nStUs <= 0)
+    {
+        EnterCriticalSection(&g_sCliTx.cs);
+        STCAN_MSG sTmpl = g_sCliTx.sTmpl;
+        sTmpl.m_bCANFD = g_udsCanFd ? true : false;
+        int nFrameBytes = g_sCliTx.nDlc;
+        LeaveCriticalSection(&g_sCliTx.cs);
+        nStUs = CliTxFrameUs(sTmpl, nFrameBytes);
+    }
+    LONGLONG llStTicks = (LONGLONG)nStUs * qpf.QuadPart / 1000000;
+    /* STmin=0: fixed submit period (DILC_SendMsg time is inside it). A late
+       frame restarts the grid instead of bursting to catch up. A real STmin
+       from the server is still measured from the end of the previous submit. */
+    BOOL bGrid = (pJob->nStUs <= 0);
+    LONGLONG llDue = 0;
+    int nSent = 0;
+    BOOL bDone = FALSE;
+    BOOL bFailed = FALSE;
+    for (;;)
+    {
+        if (nSent > 0)
+        {
+            for (;;)
+            {
+                QueryPerformanceCounter(&qNow);
+                LONGLONG llLeft = (bGrid ? llDue : qLast.QuadPart + llStTicks) - qNow.QuadPart;
+                if (llLeft <= 0)
+                {
+                    break;
+                }
+                if (llLeft * 1000 / qpf.QuadPart >= 3)
+                {
+                    Sleep(1);
+                }
+                else
+                {
+                    YieldProcessor();
+                }
+            }
+        }
+        STCAN_MSG sMsg;
+        BOOL bLast = FALSE;
+        BOOL bBlockEnd = FALSE;
+        EnterCriticalSection(&g_sCliTx.cs);
+        if (g_sCliTx.lGen != pJob->lGen || g_sCliTx.pData == NULL)
+        {
+            LeaveCriticalSection(&g_sCliTx.cs);
+            break;
+        }
+        int n = g_sCliTx.nLen - g_sCliTx.nOff;
+        if (n <= 0)
+        {
+            LeaveCriticalSection(&g_sCliTx.cs);
+            bDone = TRUE;
+            break;
+        }
+        if (n > g_sCliTx.nCfBytes)
+        {
+            n = g_sCliTx.nCfBytes;
+        }
+        int nPci = g_sCliTx.nPci;
+        int nDlc = g_sCliTx.nDlc;
+        sMsg = g_sCliTx.sTmpl;
+        memset(sMsg.m_ucData + nPci, 0, sizeof(sMsg.m_ucData) - nPci);
+        sMsg.m_ucData[nPci] = (BYTE)(0x20 | (g_sCliTx.nSn & 0x0F));
+        memcpy(sMsg.m_ucData + nPci + 1, g_sCliTx.pData + g_sCliTx.nOff, n);
+        sMsg.m_ucDataLen = (unsigned char)nDlc;
+        sMsg.m_bCANFD = g_udsCanFd ? true : false;
+        g_sCliTx.nOff += n;
+        g_sCliTx.nSn = (g_sCliTx.nSn + 1) & 0x0F;
+        bLast = (g_sCliTx.nOff >= g_sCliTx.nLen);
+        bBlockEnd = (!bLast && pJob->nBs > 0 && nSent + 1 >= pJob->nBs);
+        if (bBlockEnd)
+        {
+            /* Armed before the frame goes out so an immediate FC is not missed. */
+            FWaitFlow = TRUE;
+        }
+        LeaveCriticalSection(&g_sCliTx.cs);
+
+        if (bGrid)
+        {
+            QueryPerformanceCounter(&qNow);
+            if (llDue == 0 || qNow.QuadPart - llDue > llStTicks)
+            {
+                llDue = qNow.QuadPart;
+            }
+            llDue += llStTicks;
+        }
+        HRESULT hr = g_pouDIL_CAN_Interface->DILC_SendMsg(g_dwClientID, sMsg);
+        if (hr != S_OK)
+        {
+            DWORD t0 = GetTickCount();
+            int nTries = 0;
+            while (hr != S_OK && g_sCliTx.lGen == pJob->lGen && (GetTickCount() - t0) < CLI_TX_RETRY_MS)
+            {
+                Sleep(nTries < 16 ? 0 : 1);
+                nTries++;
+                hr = g_pouDIL_CAN_Interface->DILC_SendMsg(g_dwClientID, sMsg);
+            }
+            if (hr != S_OK)
+            {
+                bFailed = TRUE;
+                break;
+            }
+        }
+        QueryPerformanceCounter(&qLast);
+        nSent++;
+        if (bLast)
+        {
+            bDone = TRUE;
+            break;
+        }
+        if (bBlockEnd)
+        {
+            break;
+        }
+    }
+    if ((bDone || bFailed) && g_sCliTx.lGen == pJob->lGen)
+    {
+        InterlockedExchange(&g_sCliTx.lBusy, 0);
+        if (g_sCliTx.hNotify != NULL)
+        {
+            ::PostMessage(g_sCliTx.hNotify, WM_UDS_CLI_TX_DONE, bFailed ? 1 : 0, 0);
+        }
+    }
+    InterlockedExchange(&g_sCliTx.lRunning, 0);
+    delete pJob;
+    return 0;
+}
+
+/* Called on the CAN read thread when a CTS Flow Control arrives. */
+void UdsClientTxOnFc(int nBs, BYTE ucSt)
+{
+    CliTxInit();
+    g_sCliTx.ucLastSt = ucSt;
+    if (g_sCliTx.lBusy == 0)
+    {
+        return;
+    }
+    if (InterlockedCompareExchange(&g_sCliTx.lRunning, 1, 0) != 0)
+    {
+        return;
+    }
+    SCliTxJob* pJob = new SCliTxJob;
+    pJob->lGen = g_sCliTx.lGen;
+    pJob->nBs = nBs;
+    pJob->nStUs = CliTxDecodeStUs(ucSt);
+    uintptr_t h = _beginthreadex(NULL, 0, CliTxThread, pJob, 0, NULL);
+    if (h == 0)
+    {
+        InterlockedExchange(&g_sCliTx.lRunning, 0);
+        delete pJob;
+        return;
+    }
+    CloseHandle((HANDLE)h);
+}
 
 
 // CUDSMainWnd dialog
@@ -163,6 +470,9 @@ BEGIN_MESSAGE_MAP(CUDSMainWnd, CDialog)
     ON_MESSAGE (WM_COMMANDHELP, CUDSMainWnd::OnCommandHelp )
     ON_MESSAGE (WM_UDS_EVALUATE_MSG, OnEvaluateCanMsg )
     ON_MESSAGE (WM_UDS_CONTINUE_CF, OnContinueCf )
+    ON_MESSAGE (WM_UDS_CLI_TX_DONE, OnClientTxDone )
+    ON_MESSAGE (WM_UDS_LONG_RX_UI, OnLongRxUi )
+    ON_MESSAGE (WM_UDS_SEND_FC, OnSendFlowControl )
     ON_WM_DESTROY()
 
 END_MESSAGE_MAP()
@@ -227,6 +537,28 @@ static int UdsTxDlc()
     return g_udsFdDlc;
 }
 
+/* Hands the bytes after the First Frame to the CF worker. The FF message is
+   the template (ID, channel, extended-address byte). */
+static void ArmConsecutiveFrames(const CString& omHexRest, const STCAN_MSG& sFf, HWND hNotify)
+{
+    int nDlc = g_udsCanFd ? UdsTxDlc() : 8;
+    int nPci = initialByte;
+    if (nPci < 0)
+    {
+        nPci = 0;
+    }
+    int nCfBytes = nDlc - 1 - aux_Finterface;
+    if (nPci + 1 + nCfBytes > nDlc)
+    {
+        nCfBytes = nDlc - nPci - 1;
+    }
+    if (nCfBytes < 1)
+    {
+        nCfBytes = 1;
+    }
+    CliTxArm(omHexRest, sFf, nPci, nDlc, nCfBytes, hNotify);
+}
+
 int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mPSTXSELMSGDATA psTxCanMsgUds, UDS_INTERFACE FInterface)
 {
     if (g_udsCanFd)
@@ -273,15 +605,14 @@ int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mP
         }
         psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
         psTxCanMsgUds->m_psTxMsg->m_bCANFD = true;
-        SendSimpleDiagnosticMessage();
         int takenChars = ffData * 2;
         omByteStr = omByteStr.Right(((UINT)TotalLength * 2) - takenChars);
-        DatatoSend = omByteStr;
         TotalLength = (((UINT)TotalLength * 2) - takenChars) / 2;
-        FWaitFlow = TRUE;
         ConsecutiveFrame = 0x21;
-        s_cfBlockCount = 0;
-        s_cfNeedGap = 0;
+        /* Armed before the FF goes out; the FC can arrive on the read thread at once. */
+        ArmConsecutiveFrames(omByteStr, psTxCanMsgUds->m_psTxMsg[0], m_hWnd);
+        FWaitFlow = TRUE;
+        SendSimpleDiagnosticMessage();
         return 0;
     }
     int pci = initialByte;
@@ -319,19 +650,18 @@ int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mP
     }
     psTxCanMsgUds->m_psTxMsg->m_ucDataLen = 8;
     psTxCanMsgUds->m_psTxMsg->m_bCANFD = false;
-    SendSimpleDiagnosticMessage();
 
     int takenChars = ffData * 2;
     if (takenChars > omByteStr.GetLength())
     {
         takenChars = omByteStr.GetLength();
     }
-    DatatoSend = omByteStr.Mid(takenChars);
-    TotalLength = (UINT)(DatatoSend.GetLength() / 2);
-    FWaitFlow = TRUE;
+    CString omRest = omByteStr.Mid(takenChars);
+    TotalLength = (UINT)(omRest.GetLength() / 2);
     ConsecutiveFrame = 0x21;
-    s_cfBlockCount = 0;
-    s_cfNeedGap = 0;
+    ArmConsecutiveFrames(omRest, psTxCanMsgUds->m_psTxMsg[0], m_hWnd);
+    FWaitFlow = TRUE;
+    SendSimpleDiagnosticMessage();
     return 0;
 }
 
@@ -349,116 +679,32 @@ int CUDSMainWnd::SendFirstFrame(CString omByteStr, unsigned char abByteArr[], mP
  Date Created   :   28.05.2013
 **********************************************************************************************************/
 
-void CUDSMainWnd::SendContinuosFrames( unsigned char abByteArr[],mPSTXSELMSGDATA psTxCanMsgUds, UDS_INTERFACE FInterface)
+void CUDSMainWnd::SendContinuosFrames( unsigned char /*abByteArr*/[], mPSTXSELMSGDATA /*psTxCanMsgUds*/, UDS_INTERFACE /*FInterface*/)
 {
-    if (s_cfBusy)
-    {
-        return;
-    }
-    s_cfBusy = 1;
-    if (s_cfNeedGap)
-    {
-        PaceNextCfGap(STMin);
-    }
-    s_cfNeedGap = 1;
-    int frameDlc = g_udsCanFd ? UdsTxDlc() : 8;
-    int pci = initialByte;
-    if (pci < 0)
-    {
-        pci = 0;
-    }
-    int cfBytes = frameDlc - 1 - aux_Finterface;
-    if (cfBytes < 1)
-    {
-        cfBytes = 1;
-    }
-    if (pci + 1 + cfBytes > frameDlc)
-    {
-        cfBytes = frameDlc - pci - 1;
-    }
-    if (cfBytes < 1)
-    {
-        cfBytes = 1;
-    }
-    if (DatatoSend.GetLength() < 2)
-    {
-        s_cfBlockCount = 0;
-        s_cfBusy = 0;
-        m_omSendButton.EnableWindow(TRUE);
-        return;
-    }
-    int nbytes = DatatoSend.GetLength() / 2;
-    if (nbytes > cfBytes)
-    {
-        nbytes = cfBytes;
-    }
-    if (g_udsCanFd)
-    {
-        memset(abByteArr, 0, 64);
-    }
-    else
-    {
-        for (int k = pci; k < frameDlc && k < 64; k++)
-        {
-            abByteArr[k] = 0;
-        }
-    }
-    abByteArr[pci] = (BYTE)ConsecutiveFrame;
-    for (int n = 0; n < nbytes; n++)
-    {
-        CString one = DatatoSend.Mid(n * 2, 2);
-        abByteArr[pci + 1 + n] = (BYTE)_tcstol(one, NULL, 16);
-    }
-    psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)frameDlc;
-    psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
-    SendSimpleDiagnosticMessage();
-
-    DatatoSend = DatatoSend.Mid(nbytes * 2);
-    TotalLength = (UINT)(DatatoSend.GetLength() / 2);
-    ConsecutiveFrame++;
-    if (ConsecutiveFrame == 0x30)
-    {
-        ConsecutiveFrame = 0x20;
-    }
-    s_cfBlockCount++;
-    if (BSizE > 0 && s_cfBlockCount >= BSizE)
-    {
-        s_cfBlockCount = 0;
-        s_cfBusy = 0;
-        s_cfNeedGap = 0;
-        KillTimer(ID_TIMER_CF);
-        FWaitFlow = TRUE;
-        c_dDiffTime = 0;
-        return;
-    }
-    c_unPreviousTime = -1;
-    c_dDiffTime = 0;
-    s_cfBusy = 0;
-    if (DatatoSend.GetLength() >= 2)
-    {
-        KillTimer(ID_TIMER_CF);
-        /* Do not use SetTimer(1): WM_TIMER is ~15 ms and makes bootloader
-           transfers unusable. Pace with QPC, then continue on the UI queue. */
-        PostMessage(WM_UDS_CONTINUE_CF, 0, 0);
-        return;
-    }
-    KillTimer(ID_TIMER_CF);
-    s_cfBlockCount = 0;
-    s_cfNeedGap = 0;
-    m_omSendButton.EnableWindow(TRUE);
+    UdsClientTxOnFc(BSizE, g_sCliTx.ucLastSt);
 }
 
 LRESULT CUDSMainWnd::OnContinueCf(WPARAM /*wParam*/, LPARAM /*lParam*/)
 {
-    if (FWaitFlow || psTxCanMsgUds == NULL || psTxCanMsgUds->m_psTxMsg == NULL)
+    if (FWaitFlow || !UdsClientTxBusy())
     {
         return 0;
     }
-    if (DatatoSend.GetLength() < 2)
+    SendContinuosFrames(NULL, NULL, fInterface);
+    return 0;
+}
+
+LRESULT CUDSMainWnd::OnClientTxDone(WPARAM wParam, LPARAM /*lParam*/)
+{
+    if (wParam != 0)
     {
-        return 0;
+        SetDlgItemText(IDC_RESPONSE_DATA, "\r\nISO-TP transmit aborted: CAN send kept failing");
     }
-    SendContinuosFrames(psTxCanMsgUds->m_psTxMsg->m_ucData, psTxCanMsgUds, fInterface);
+    else if (m_omDiagService == UDS_WAIT_RSP_TEXT)
+    {
+        SetTimer(ID_TIMER_SEND_BUTTON, P2_Time, NULL);
+    }
+    m_omSendButton.EnableWindow(TRUE);
     return 0;
 }
 
@@ -554,7 +800,19 @@ UINT CUDSMainWnd::OnSendSelectedMsg(LPVOID pParam)
 
 void CUDSMainWnd::PrepareFlowControl()
 {
-    /* ISO-TP FC: 30 | BlockSize | STmin, DLC = Flow Control Length from Settings. */
+    /* ISO-TP FC: 30 | BlockSize | STmin.
+       Must run on the UI thread. Calling DILC_SendMsg from the PSDI read
+       thread (inside m_sCritSecDataSync) stalls VC02C RX — FF is seen
+       (6/4095) but CFs never reach EvaluateMessage. */
+    if (psTxCanMsgUds == NULL || psTxCanMsgUds->m_psTxMsg == NULL)
+    {
+        return;
+    }
+    if (GetWindowThreadProcessId(GetSafeHwnd(), NULL) != GetCurrentThreadId())
+    {
+        PostMessage(WM_UDS_SEND_FC, 0, 0);
+        return;
+    }
     int minLen = initialByte + 3;
     if (minLen < 3)
     {
@@ -571,58 +829,24 @@ void CUDSMainWnd::PrepareFlowControl()
     }
     unsigned char bs = (unsigned char)(BSize & 0xFF);
     unsigned char st = (unsigned char)(SSTMin & 0xFF);
-    Counter_BSize = BSize;
+    Counter_BSize = (int)bs;
     psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
-    memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, 8);
+    memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, g_udsCanFd ? 64 : 8);
 
-    // ################## Casian #############################//
-    switch(fInterface)
+    if (fInterface == INTERFACE_EXTENDED_11)
     {
-        case INTERFACE_NORMAL_11 :
-        {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
-            SendSimpleDiagnosticMessage();
-
-        };
-        break;
-
-        case INTERFACE_EXTENDED_11 :
-        {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte-1] = TargetAddress;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
-            SendSimpleDiagnosticMessage();
-
-        };
-        break;
-
-        case INTERFACE_NORMAL_ISO_29 :
-        {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
-            SendSimpleDiagnosticMessage();
-
-        };
-        break;
-
-        case INTERFACE_NORMAL_J1939_29 :
-        {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1] = bs;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2] = st;
-
-            SendSimpleDiagnosticMessage();
-
-        };
-        break;
-
+        psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte - 1] = TargetAddress;
     }
-    // ################## Casian #############################//
+    psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x30;
+    psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 1] = bs;
+    psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 2] = st;
 
+    /* Do not StartTimer() here — FC must not restart Tester Present. */
+    if (psTxCanMsgUds->m_psTxMsg->m_unMsgID != 0 && g_pouDIL_CAN_Interface != NULL)
+    {
+        psTxCanMsgUds->m_psTxMsg->m_bCANFD = g_udsCanFd ? true : false;
+        g_pouDIL_CAN_Interface->DILC_SendMsg(g_dwClientID, psTxCanMsgUds->m_psTxMsg[0]);
+    }
 }
 
 /**********************************************************************************************************
@@ -909,10 +1133,19 @@ void CUDSMainWnd::OnBnClickedSendUD()
                 StartTimer();    // Start de timer for tester present
             }
             CString omLog;
+            CString omData = m_omMsgDataEdit;
+            if (omData.GetLength() > UDS_LOG_DATA_CHARS)
+            {
+                CString omHex = m_omMsgDataEdit;
+                omHex.Remove(' ');
+                CString omMore;
+                omMore.Format("... (%d bytes)", (omHex.GetLength() + 1) / 2);
+                omData = omData.Left(UDS_LOG_DATA_CHARS) + omMore;
+            }
             omLog.Format("TX ch=%d id=0x%X data=%s",
                          psTxCanMsgUds->m_psTxMsg->m_ucChannel,
                          psTxCanMsgUds->m_psTxMsg->m_unMsgID,
-                         m_omMsgDataEdit);
+                         omData);
             AppendLog(omLog);
         }
     }
@@ -986,6 +1219,12 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
     {
         m_omSendButton.EnableWindow(TRUE);
         KillTimer(ID_TIMER_SEND_BUTTON);
+        /* P2 runs from the end of the request; OnClientTxDone restarts it
+           after the last consecutive frame. */
+        if (!UdsClientTxBusy() && m_omDiagService == UDS_WAIT_RSP_TEXT)
+        {
+            SetResponseService(UDS_NO_RSP_TEXT);
+        }
     }
     if (nIDEvent == ID_TIMER_CF)
     {
@@ -1102,13 +1341,22 @@ void CUDSMainWnd::OnEnChangeData()
     omByteStr.Replace("\t","");
 
     UINT LengthStr = omByteStr.GetLength();
-    m_omMsgDataEdit = "";
-    while( omByteStr.GetLength()>2)
     {
-        m_omMsgDataEdit = m_omMsgDataEdit + omByteStr.Left(2)+" ";
-        omByteStr = omByteStr.Right(omByteStr.GetLength()-2);
+        CString omSpaced;
+        int nIn = (int)LengthStr;
+        char* pOut = omSpaced.GetBuffer(nIn + nIn / 2 + 1);
+        int nOut = 0;
+        for (int i = 0; i < nIn; i++)
+        {
+            if (i > 0 && (i % 2) == 0)
+            {
+                pOut[nOut++] = ' ';
+            }
+            pOut[nOut++] = omByteStr[i];
+        }
+        omSpaced.ReleaseBuffer(nOut);
+        m_omMsgDataEdit = omSpaced;
     }
-    m_omMsgDataEdit = m_omMsgDataEdit + omByteStr;
 
     UINT Data_Length = (LengthStr/2) + LengthStr%2;;
     m_stringEditDLC = (LengthStr/2) + LengthStr%2;
@@ -1581,7 +1829,7 @@ CString CUDSMainWnd::initialEval(CString Data2Send )
         }
     }
     Font_Color = RGB(184,134,11 );
-    return "     No Response Received";        // If it's the case of  No Positive Response Required return the default value
+    return UDS_WAIT_RSP_TEXT;
 }
 
 //________________________________________________________________________________________________________________________________________________________________
@@ -1637,6 +1885,8 @@ LRESULT CUDSMainWnd::OnCommandHelp ( WPARAM wParam, LPARAM lParam )
 
 void UdsDrainRx();
 void UdsFlushRx();
+int UdsClientLongRxCopy(BYTE* out, int cap, int* total, BOOL* done);
+CString UdsClientLongRxTakeSvc();
 
 LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam)
 {
@@ -1654,6 +1904,69 @@ LRESULT CUDSMainWnd::OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+LRESULT CUDSMainWnd::OnSendFlowControl(WPARAM /*wParam*/, LPARAM /*lParam*/)
+{
+    PrepareFlowControl();
+    return 0;
+}
+
+LRESULT CUDSMainWnd::OnLongRxUi(WPARAM wParam, LPARAM /*lParam*/)
+{
+    if (wParam & 8)
+    {
+        SetDlgItemText(IDC_RESPONSE_DATA, "\r\nISO-TP receive aborted: consecutive frame sequence error");
+        m_omSendButton.EnableWindow(TRUE);
+        KillTimer(ID_TIMER_SEND_BUTTON);
+        return 0;
+    }
+    if (wParam & 4)
+    {
+        KillTimer(ID_TIMER_SEND_BUTTON);
+        SetTimer(ID_TIMER_SEND_BUTTON, P2_Time, NULL);
+        return 0;
+    }
+    if (wParam & 2)
+    {
+        SetResponseService(UdsClientLongRxTakeSvc());
+    }
+    BOOL done = (wParam & 1) ? TRUE : FALSE;
+    BYTE buf[8192];
+    int total = 0;
+    BOOL fin = FALSE;
+    int got = UdsClientLongRxCopy(buf, (int)sizeof(buf), &total, &fin);
+    if (total > 0)
+    {
+        ShowResponseBytes(buf, got, total, done || fin);
+        m_omBytes.vSetValue(total);
+        if (done || fin)
+        {
+            m_omSendButton.EnableWindow(TRUE);
+            KillTimer(ID_TIMER_SEND_BUTTON);
+            TryAutoSendSecurityKeyFromResponse();
+        }
+        else
+        {
+            m_omSendButton.EnableWindow(FALSE);
+            SetTimer(ID_TIMER_SEND_BUTTON, P2_Time, NULL);
+        }
+        return 0;
+    }
+    if (done)
+    {
+        BYTE cap[512];
+        int n = DIL_UDS_CopyResponse(cap, (int)sizeof(cap));
+        if (n > 0)
+        {
+            ShowResponseBytes(cap, n, n, TRUE);
+            m_omBytes.vSetValue(n);
+        }
+        m_omSendButton.EnableWindow(TRUE);
+        KillTimer(ID_TIMER_SEND_BUTTON);
+        TryAutoSendSecurityKeyFromResponse();
+    }
+    return 0;
+}
+
 void CUDSMainWnd::ShowResponseBytes(const BYTE* data, int got, int total, BOOL done)
 {
     HWND h = ::GetDlgItem(m_hWnd, IDC_RESPONSE_DATA);
@@ -1662,7 +1975,10 @@ void CUDSMainWnd::ShowResponseBytes(const BYTE* data, int got, int total, BOOL d
         return;
     }
     CString text;
-    BOOL full = (done || total <= 4096);
+    /* Only dump the full hex when the PDU is complete. Intermediate updates
+       for large 76 responses used to SetWindowText on every CF and re-enter
+       the RX path through the message pump. */
+    BOOL full = done ? TRUE : FALSE;
     if (!full)
     {
         text.Format("\r\nReceiving %d / %d bytes...", got, total);
@@ -1724,6 +2040,7 @@ void CUDSMainWnd::SetResponseService(const CString& text)
 void CUDSMainWnd::OnDestroy()
 {
     KillTimer(ID_TIMER_CF);
+    UdsClientTxCancel();
     UdsFlushRx();
     MSG msg;
     while (PeekMessage(&msg, m_hWnd, WM_UDS_CONTINUE_CF, WM_UDS_CONTINUE_CF, PM_REMOVE))
@@ -1749,14 +2066,28 @@ void CUDSMainWnd::AppendLog(const CString& omText)
     {
         return;
     }
-    CString omOld;
-    m_omEditLog.GetWindowText(omOld);
     CTime omNow = CTime::GetCurrentTime();
     CString omLine;
     omLine.Format("[%s] %s\r\n", omNow.Format("%H:%M:%S"), omText);
-    omOld += omLine;
-    m_omEditLog.SetWindowText(omOld);
-    m_omEditLog.LineScroll(m_omEditLog.GetLineCount());
+    /* SetWindowText of the whole log re-lays out every line, so each append
+       cost grew with the log size and stalled the UI thread for seconds. */
+    if (m_omEditLog.GetLimitText() < UDS_LOG_LIMIT)
+    {
+        m_omEditLog.SetLimitText(UDS_LOG_LIMIT);
+    }
+    int nLen = m_omEditLog.GetWindowTextLength();
+    if (nLen + omLine.GetLength() > UDS_LOG_KEEP)
+    {
+        int nCut = m_omEditLog.LineIndex(m_omEditLog.LineFromChar(nLen - UDS_LOG_KEEP / 2) + 1);
+        if (nCut > 0)
+        {
+            m_omEditLog.SetSel(0, nCut);
+            m_omEditLog.ReplaceSel("");
+            nLen = m_omEditLog.GetWindowTextLength();
+        }
+    }
+    m_omEditLog.SetSel(nLen, nLen);
+    m_omEditLog.ReplaceSel(omLine);
 }
 
 void CUDSMainWnd::SetRequestPayload(const CString& omHex)

@@ -30,6 +30,11 @@ extern int SSTMin;
 extern int BSize;
 extern int BSizE;
 extern int SizeFC;
+/** Consecutive-frame TX worker for long requests (see UDSMainWnd.cpp). */
+void UdsClientTxOnFc(int nBs, BYTE ucSt);
+BOOL UdsClientTxBusy();
+void UdsClientSetChannelBitrate(int channel, UINT nominalBps, UINT dataBps, BOOL canFd);
+void UdsClientTxCancel();
 extern int P2_Time;
 extern int P2_Time_Extended;
 extern CString Bytes_to_Show;
@@ -229,6 +234,9 @@ public:
     afx_msg LRESULT OnCommandHelp ( WPARAM wParam, LPARAM lParam );
     afx_msg LRESULT OnEvaluateCanMsg(WPARAM wParam, LPARAM lParam);
     afx_msg LRESULT OnContinueCf(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnClientTxDone(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnLongRxUi(WPARAM wParam, LPARAM lParam);
+    afx_msg LRESULT OnSendFlowControl(WPARAM wParam, LPARAM lParam);
     afx_msg void OnDestroy();
     afx_msg void OnTvnSelchangedServices(NMHDR* pNMHDR, LRESULT* pResult);
     afx_msg void OnBnClickedAdd();

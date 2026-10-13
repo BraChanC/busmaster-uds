@@ -17,7 +17,7 @@
 #include "UDSTransfer.h"
 #include "UDS_Protocol.h"
 #include "CANDriverDefines.h"
-
+#include <stdio.h>
 
 CUDSMainWnd* omMainWnd = NULL;
 CUDS_NegRespMng* NegRespManager = NULL;
@@ -130,10 +130,8 @@ BOOL CUDS_Protocol::InitInstance()
  Author(s)      :   Sanchez Marin Maria Alejandra
  Date Created   :   01.03.2013
 **********************************************************************************************************/
-USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels)
+static HRESULT UdsEnsureMainWnd(HWND hParent, int TotalChannels)
 {
-    AFX_MANAGE_STATE(AfxGetStaticModuleState());
-
     if (omMainWnd != NULL && !::IsWindow(omMainWnd->GetSafeHwnd()))
     {
         omMainWnd = NULL;
@@ -167,10 +165,26 @@ USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels)
         omManagerPtr->UpdateFields();
     }
 
-    omMainWnd->ShowWindow(SW_SHOW);
     omMainWnd->SetWindowText("Main Diagnostic Window");
     omMainWnd->ApplyCanFdSwitch();
     return 0;
+}
+
+USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    HRESULT hr = UdsEnsureMainWnd(hParent, TotalChannels);
+    if (hr == 0)
+    {
+        omMainWnd->ShowWindow(SW_SHOW);
+    }
+    return hr;
+}
+
+USAGEMODE HRESULT DIL_UDS_PrepareWnd(HWND hParent, int TotalChannels)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    return UdsEnsureMainWnd(hParent, TotalChannels);
 }
 
 USAGEMODE void DIL_UDS_SetCanFdAvailable(BOOL available)
@@ -185,6 +199,11 @@ USAGEMODE void DIL_UDS_SetCanFdAvailable(BOOL available)
     {
         omMainWnd->ApplyCanFdSwitch();
     }
+}
+
+USAGEMODE void DIL_UDS_SetChannelBitrate(int channel, UINT nominalBps, UINT dataBps, BOOL canFd)
+{
+    UdsClientSetChannelBitrate(channel, nominalBps, dataBps, canFd);
 }
 
 USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent)
@@ -260,6 +279,7 @@ static BYTE* g_capBuf = NULL;
 static int g_capLen = 0;
 static int g_capCap = 0;
 static volatile LONG g_capSeq = 0;
+HWND volatile g_hUdsRspNotify = NULL;
 static CRITICAL_SECTION g_capCs;
 static BOOL g_capCsReady = FALSE;
 
@@ -331,7 +351,7 @@ static void CapRememberLocked(const BYTE* data, int n)
     g_capRecentN++;
 }
 
-static void StoreCapLocked(const BYTE* data, int n, BOOL remember)
+static void StoreCapLocked(const BYTE* data, int n, BOOL /*remember*/)
 {
     if (n < 0)
     {
@@ -341,7 +361,10 @@ static void StoreCapLocked(const BYTE* data, int n, BOOL remember)
     {
         n = 0x100000;
     }
-    if (!remember && CapSeenLocked(data, n))
+    /* Dedupe both client Capture and server Publish. Otherwise the same
+       multi-frame 76 is stored twice (Capture then NoteTxDone Publish),
+       Transfer sees a fake second response and aborts before 36 02. */
+    if (CapSeenLocked(data, n))
     {
         return;
     }
@@ -356,11 +379,13 @@ static void StoreCapLocked(const BYTE* data, int n, BOOL remember)
         memcpy(g_capBuf, data, n);
     }
     g_capLen = n;
-    if (remember)
-    {
-        CapRememberLocked(data, n);
-    }
+    CapRememberLocked(data, n);
     InterlockedIncrement(&g_capSeq);
+    HWND hNotify = g_hUdsRspNotify;
+    if (hNotify != NULL)
+    {
+        ::PostMessage(hNotify, WM_UDS_RSP_READY, 0, 0);
+    }
 }
 
 static void CaptureUdsResponse(const BYTE* data, int n)
@@ -488,6 +513,158 @@ static int g_longCap = 0;
 static int g_longGot = 0;
 static int g_longTotal = 0;
 static int g_longPub = 0;
+static CRITICAL_SECTION g_longCs;
+static volatile LONG g_longCsInit = 0;
+static CString g_longSvcPending;
+/* Next expected CF sequence number (ISO 15765-2: FF=0, first CF=1, wraps 0..F). */
+static int g_longExpSn = 1;
+static int g_longCfCount = 0;
+/* Set when the receiver must abort (N_WRONG_SN). Read once by Transfer. */
+static char g_longErr[200];
+
+static void EnsureLongCs()
+{
+    if (g_longCsInit == 2)
+    {
+        return;
+    }
+    if (InterlockedCompareExchange(&g_longCsInit, 1, 0) == 0)
+    {
+        InitializeCriticalSection(&g_longCs);
+        g_longCsInit = 2;
+    }
+    else
+    {
+        while (g_longCsInit != 2)
+        {
+            Sleep(0);
+        }
+    }
+}
+
+/* TRUE while client ISO-TP is still assembling a multi-frame response. */
+BOOL UdsClientLongRxPending()
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    BOOL pending = (g_longTotal > 0 && g_longGot < g_longTotal);
+    LeaveCriticalSection(&g_longCs);
+    return pending;
+}
+
+int UdsClientLongRxGot()
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    int got = g_longGot;
+    LeaveCriticalSection(&g_longCs);
+    return got;
+}
+
+int UdsClientLongRxTotal()
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    int total = g_longTotal;
+    LeaveCriticalSection(&g_longCs);
+    return total;
+}
+
+/* Copy assembled bytes for UI thread. Returns got; total out-param. */
+int UdsClientLongRxCopy(BYTE* out, int cap, int* total, BOOL* done)
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    int got = g_longGot;
+    int tot = g_longTotal;
+    BOOL fin = (tot > 0 && got >= tot);
+    int n = got;
+    if (n > cap)
+    {
+        n = cap;
+    }
+    if (n > 0 && out != NULL && g_longBuf != NULL)
+    {
+        memcpy(out, g_longBuf, n);
+    }
+    LeaveCriticalSection(&g_longCs);
+    if (total != NULL)
+    {
+        *total = tot;
+    }
+    if (done != NULL)
+    {
+        *done = fin;
+    }
+    return got;
+}
+
+/* Returns TRUE once after the client aborted a multi-frame receive. */
+BOOL UdsClientTakeRxError(CString& text)
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    BOOL has = (g_longErr[0] != 0);
+    if (has)
+    {
+        text = g_longErr;
+        g_longErr[0] = 0;
+    }
+    LeaveCriticalSection(&g_longCs);
+    return has;
+}
+
+/* ISO 15765-2 N_Cr: the receiver gives up when the next CF does not arrive. */
+void UdsClientAbortLongRx()
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    if (g_longTotal > 0)
+    {
+        g_longTotal = 0;
+        g_longGot = 0;
+        TotalFrames = 0;
+        FSending = FALSE;
+    }
+    LeaveCriticalSection(&g_longCs);
+}
+
+CString UdsClientLongRxTakeSvc()
+{
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+    CString svc = g_longSvcPending;
+    g_longSvcPending.Empty();
+    LeaveCriticalSection(&g_longCs);
+    return svc;
+}
+
+static void PostLongRxUi(BOOL done, const CString* svc)
+{
+    CUDSMainWnd* wnd = omMainWnd;
+    if (wnd == NULL || !::IsWindow(wnd->GetSafeHwnd()))
+    {
+        return;
+    }
+    if (svc != NULL)
+    {
+        EnsureLongCs();
+        EnterCriticalSection(&g_longCs);
+        g_longSvcPending = *svc;
+        LeaveCriticalSection(&g_longCs);
+    }
+    /* wParam: bit0=done, bit1=has service text */
+    WPARAM wp = 0;
+    if (done)
+    {
+        wp |= 1;
+    }
+    if (svc != NULL)
+    {
+        wp |= 2;
+    }
+    wnd->PostMessage(WM_UDS_LONG_RX_UI, wp, 0);
+}
 
 static void EnsureUdsRxCs()
 {
@@ -635,6 +812,9 @@ static void BeginLongResponse(int total)
     g_longGot = 0;
     g_longTotal = total;
     g_longPub = 0;
+    g_longExpSn = 1;
+    g_longCfCount = 0;
+    g_longErr[0] = 0;
 }
 
 static void AppendLongResponse(const BYTE* data, int n)
@@ -651,38 +831,285 @@ static void AppendLongResponse(const BYTE* data, int n)
     g_longGot += n;
 }
 
-static void PublishLongResponse(BOOL done)
+static void PublishLongResponse(BOOL done, const CString* svc)
 {
-    if (omMainWnd == NULL || !::IsWindow(omMainWnd->GetSafeHwnd()))
-    {
-        return;
-    }
-    if (!done && g_longTotal > 4096 && g_longPub != 0 && (g_longGot - g_longPub) < 16384)
-    {
-        return;
-    }
-    g_longPub = g_longGot;
-    omMainWnd->ShowResponseBytes(g_longBuf, g_longGot, g_longTotal, done);
-    if (done)
+    /* Capture first — Transfer waits on g_capSeq. Must run on the read
+       thread as soon as the PDU is complete (not after UI drain). */
+    if (done && g_longBuf != NULL && g_longGot > 0)
     {
         CaptureUdsResponse(g_longBuf, g_longGot);
+        if (omManagerPtr != NULL)
+        {
+            CString hex;
+            int n = g_longGot;
+            if (n > 64)
+            {
+                n = 64;
+            }
+            for (int i = 0; i < n; i++)
+            {
+                CString one;
+                one.Format("%02X ", g_longBuf[i]);
+                hex += one;
+            }
+            omManagerPtr->Data_Recibida = hex;
+            omManagerPtr->numberOfBytes = g_longGot;
+        }
     }
-    if (done && omManagerPtr != NULL)
+    /* Never SetWindowText here — it re-enters the pump and was the old
+       reason CFs visible in Message Window never reached g_longGot. */
+    if (!done)
     {
-        CString hex;
-        int n = g_longGot;
-        if (n > 64)
+        if (g_longPub != 0 && (g_longGot - g_longPub) < 4096 && svc == NULL)
         {
-            n = 64;
+            return;
         }
-        for (int i = 0; i < n; i++)
+        g_longPub = g_longGot;
+    }
+    else
+    {
+        g_longPub = g_longGot;
+    }
+    PostLongRxUi(done, svc);
+}
+
+/* ISO-TP client assembly. Called from the CAN read thread for every RX that
+   also reaches Message Window — must NOT defer assembly to the UI thread. */
+static void UdsClientHandleCan(const STCAN_MSG& Mensaje)
+{
+    CUDSMainWnd* pMainWnd = omMainWnd;
+    if (pMainWnd == NULL || !::IsWindow(pMainWnd->GetSafeHwnd()) || omManagerPtr == NULL)
+    {
+        return;
+    }
+
+    unsigned char psMsg[64];
+    memcpy(psMsg, Mensaje.m_ucData, 64);
+    unsigned char Datalen = Mensaje.m_ucDataLen;
+    UINT MessageID = Mensaje.m_unMsgID;
+    UINT Channel = Mensaje.m_ucChannel;
+
+    /* Do not read MFC edits from the CAN read thread — use cached globals. */
+    UINT Check_SourceAddress = (UINT)(omManagerPtr->SourceAddress << 8);
+    UINT Check_TargetAddress = (UINT)omManagerPtr->TargetAddress;
+    UINT Check_MSG_received = respID + Check_TargetAddress + Check_SourceAddress;
+
+    BOOL idMatch = (respID == MessageID || Check_MSG_received == MessageID);
+    if (!idMatch)
+    {
+        return;
+    }
+    if (!FSending || Current_Channel != Channel)
+    {
+        return;
+    }
+
+    EnsureLongCs();
+    EnterCriticalSection(&g_longCs);
+
+    TYPE_OF_FRAME TypeofFrame = omManagerPtr->getFrameType(psMsg[initialByte]);
+    BOOL longPending = (g_longTotal > 0 && g_longGot < g_longTotal);
+
+    if (FWaitFlow == TRUE && TypeofFrame == FLOW_CONTROL)
+    {
+        LeaveCriticalSection(&g_longCs);
+        switch (omManagerPtr->TypeofControl)
         {
-            CString one;
-            one.Format("%02X ", g_longBuf[i]);
-            hex += one;
+            case 0:
+            {
+                BSizE = psMsg[initialByte + 1];
+                if (psMsg[initialByte + 2] <= 0x7F)
+                {
+                    STMin = psMsg[initialByte + 2];
+                }
+                else if (psMsg[initialByte + 2] >= 0xF1 && psMsg[initialByte + 2] <= 0xF9)
+                {
+                    STMin = 1;
+                }
+                else
+                {
+                    STMin = 127;
+                }
+                FWaitFlow = FALSE;
+                UdsClientTxOnFc(BSizE, psMsg[initialByte + 2]);
+            }
+            break;
+            case 1:
+                pMainWnd->PostMessage(WM_UDS_LONG_RX_UI, 4, 0); /* restart P2 timer */
+                break;
+            default:
+                FWaitFlow = FALSE;
+                break;
         }
-        omManagerPtr->Data_Recibida = hex;
-        omManagerPtr->numberOfBytes = g_longGot;
+        return;
+    }
+    else if (TypeofFrame == LONG_RESPONSE)
+    {
+        int TempValue = strtol(CurrentService, NULL, 16);
+        int ffData = 6 - aux_Finterface;
+        int sidPos = initialByte + 2;
+        if (psMsg[initialByte] == 0x10 && psMsg[initialByte + 1] == 0x00
+                && Datalen >= (unsigned char)(initialByte + 7))
+        {
+            unsigned int len32 = ((unsigned int)psMsg[initialByte + 2] << 24)
+                                 | ((unsigned int)psMsg[initialByte + 3] << 16)
+                                 | ((unsigned int)psMsg[initialByte + 4] << 8)
+                                 | (unsigned int)psMsg[initialByte + 5];
+            Length_Received = (float)len32;
+            ffData = (int)Datalen - 6 - aux_Finterface;
+            if (ffData < 1)
+            {
+                ffData = 1;
+            }
+            sidPos = initialByte + 6;
+        }
+        else
+        {
+            Length_Received = (float)(((psMsg[initialByte] & 0x0F) << 8) | psMsg[initialByte + 1]);
+            ffData = (Datalen > 8) ? ((int)Datalen - 2 - aux_Finterface) : (6 - aux_Finterface);
+        }
+        if (sidPos < Datalen && psMsg[sidPos] == (unsigned char)(TempValue + 0x40))
+        {
+            omManagerPtr->numberOfBytes = 1;
+            int cfSize = (Datalen > 8) ? ((int)Datalen - 1 - aux_Finterface) : (7 - aux_Finterface);
+            if (cfSize < 1)
+            {
+                cfSize = 1;
+            }
+            int remain = (int)Length_Received - ffData;
+            if (remain < 0)
+            {
+                remain = 0;
+            }
+            LengthLastFrame = (cfSize > 0) ? (remain % cfSize) : 0;
+            int nCf = 0;
+            if (remain > 0 && cfSize > 0)
+            {
+                nCf = (remain + cfSize - 1) / cfSize;
+            }
+            TotalFrames = (float)nCf;
+            BeginLongResponse((int)Length_Received);
+            if (Datalen > sidPos)
+            {
+                AppendLongResponse(psMsg + sidPos, Datalen - sidPos);
+            }
+            LeaveCriticalSection(&g_longCs);
+            /* FC goes out on the UI thread: psTxCanMsgUds is the shared TX
+               buffer that the UI thread also uses for requests. */
+            pMainWnd->PostMessage(WM_UDS_SEND_FC, 0, 0);
+            CString svc;
+            if (NegRespManager != NULL)
+            {
+                svc = NegRespManager->evaluateResp(psMsg, sidPos - 1);
+            }
+            EnsureLongCs();
+            EnterCriticalSection(&g_longCs);
+            PublishLongResponse(FALSE, &svc);
+            LeaveCriticalSection(&g_longCs);
+            return;
+        }
+        LeaveCriticalSection(&g_longCs);
+        return;
+    }
+    else if (TypeofFrame == CONSECUTIVE_FRAME)
+    {
+        if (!longPending)
+        {
+            LeaveCriticalSection(&g_longCs);
+            return;
+        }
+        int sn = psMsg[initialByte] & 0x0F;
+        if (sn != g_longExpSn)
+        {
+            /* ISO 15765-2 N_WRONG_SN: a CF is missing or duplicated. Abort
+               instead of waiting forever for bytes that will never come. */
+            _snprintf(g_longErr, sizeof(g_longErr),
+                      "ISO-TP CF sequence error: expected SN %X, got %X after %d CF (%d / %d bytes)",
+                      g_longExpSn, sn, g_longCfCount, g_longGot, g_longTotal);
+            g_longErr[sizeof(g_longErr) - 1] = 0;
+            g_longTotal = 0;
+            g_longGot = 0;
+            TotalFrames = 0;
+            FSending = FALSE;
+            LeaveCriticalSection(&g_longCs);
+            pMainWnd->PostMessage(WM_UDS_LONG_RX_UI, 8, 0);
+            return;
+        }
+        g_longExpSn = (g_longExpSn + 1) & 0x0F;
+        g_longCfCount++;
+        TotalFrames--;
+        if (TotalFrames == 0)
+        {
+            FSending = FALSE;
+        }
+        else if (TotalFrames < 0)
+        {
+            Datalen = (unsigned char)(LengthLastFrame + 1 + aux_Finterface);
+            FSending = FALSE;
+        }
+        if (Datalen > (unsigned char)(initialByte + 1))
+        {
+            AppendLongResponse(psMsg + initialByte + 1, Datalen - (initialByte + 1));
+        }
+        BOOL done = (TotalFrames <= 0 || (g_longTotal > 0 && g_longGot >= g_longTotal));
+        if (g_longTotal > 0 && g_longGot >= g_longTotal)
+        {
+            TotalFrames = 0;
+            FSending = FALSE;
+        }
+        PublishLongResponse(done, NULL);
+        BOOL needFc = FALSE;
+        if (BSize > 0)
+        {
+            Counter_BSize--;
+            if (Counter_BSize == 0)
+            {
+                needFc = TRUE;
+            }
+        }
+        LeaveCriticalSection(&g_longCs);
+        if (needFc)
+        {
+            pMainWnd->PostMessage(WM_UDS_SEND_FC, 0, 0);
+        }
+        return;
+    }
+    else
+    {
+        /* While assembling a multi-frame response, ignore non-CF/FF frames
+           (including stray FC) so FSending is not cleared at 6/4095. */
+        if (longPending)
+        {
+            LeaveCriticalSection(&g_longCs);
+            return;
+        }
+        omManagerPtr->numberOfBytes = 1;
+        FSending = FALSE;
+        int sfPci = initialByte;
+        int sfLen = psMsg[initialByte];
+        if (Datalen > 8 && psMsg[initialByte] == 0x00)
+        {
+            sfPci = initialByte + 1;
+            sfLen = psMsg[initialByte + 1];
+            Length_Received = (float)sfLen;
+        }
+        LeaveCriticalSection(&g_longCs);
+        if (!FDontShow && GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL) == GetCurrentThreadId())
+        {
+            pMainWnd->m_omDiagService = NegRespManager->evaluateResp(psMsg, sfPci);
+            Length_Received, omManagerPtr->Show_ResponseData(psMsg, (unsigned char)(sfLen + sfPci + 1), sfPci);
+            pMainWnd->TryAutoSendSecurityKeyFromResponse();
+            pMainWnd->m_omBytes.vSetValue(Length_Received);
+        }
+        else if (!FDontShow)
+        {
+            CString svc = NegRespManager->evaluateResp(psMsg, sfPci);
+            /* Simple response still Captures via Show_ResponseData on UI. */
+            CaptureUdsResponse(psMsg + sfPci + 1, sfLen);
+            PostLongRxUi(TRUE, &svc);
+        }
+        FDontShow = FALSE;
+        return;
     }
 }
 
@@ -691,212 +1118,19 @@ USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  )
     AFX_MANAGE_STATE(AfxGetStaticModuleState());
     CUDSMainWnd* pMainWnd = omMainWnd;
     BOOL bClientUi = (pMainWnd != NULL && ::IsWindow(pMainWnd->GetSafeHwnd()));
-    if (!bClientUi || GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL) == GetCurrentThreadId())
-    {
-        UdsServer_OnCan(Mensaje);
-    }
+    /* Every RX reaches the server engine on this thread. It has its own lock;
+       gating it on the client window thread dropped all server RX whenever
+       the diagnostic window was open. */
+    UdsServer_OnCan(Mensaje);
     if (!bClientUi)
     {
         return 0;
     }
 
-    DWORD dwUiTid = GetWindowThreadProcessId(pMainWnd->GetSafeHwnd(), NULL);
-    if (dwUiTid != GetCurrentThreadId())
-    {
-        UdsEnqueueRx(Mensaje);
-        return 0;
-    }
-
-    unsigned char psMsg[64];
-    memcpy( psMsg , Mensaje.m_ucData , 64);
-    unsigned char Datalen = Mensaje.m_ucDataLen;
-    UINT Check_SourceAddress;
-    UINT Check_TargetAddress;
-    UINT MessageID = Mensaje.m_unMsgID;
-    UINT Channel =  Mensaje.m_ucChannel;
-
-    UINT Check_MSG_received;
-
-    // -------for checking also if the SA and TA are inserted in Main window and settings window holds only the base address (0x18DA0000)- Variable used is "Check_MSG_received" - Casian
-    Check_SourceAddress = pMainWnd->m_omSourceAddress.lGetValue()<<8;
-    Check_TargetAddress = pMainWnd->m_omTargetAddress.lGetValue();
-
-    Check_MSG_received = respID + (Check_TargetAddress) + Check_SourceAddress;
-    // Datalen is the DLC of the message received
-    if(FSending && (respID == MessageID || Check_MSG_received == MessageID) && Current_Channel == Channel)    // -------  // Evaluates the received message when: 1.MainWnd created - 2. Response to my Msg - 3.I've sent something
-    {
-
-        TYPE_OF_FRAME TypeofFrame = omManagerPtr->getFrameType(psMsg[initialByte]);     // This is a general function because it uses the variable initialByte
-
-        if (FWaitFlow == TRUE && TypeofFrame ==  FLOW_CONTROL )                 //Am I waiting for a flow control?
-        {
-
-            switch (omManagerPtr->TypeofControl)      // Para evaluar como deben estar los Textbox del SA y TA
-            {
-                case 0:
-                {
-
-                    BSizE = psMsg[initialByte+1];
-                    if(psMsg[initialByte+2]<=0x7F)                  // Evaluate all the possible Values for STmin
-                    {
-                        STMin = psMsg[initialByte+2];
-                    }
-                    else if (psMsg[initialByte+2] >= 0xF1 && psMsg[initialByte+2] <= 0xF9)
-                    {
-                        /* Spec is 100 us units; int STMin is milliseconds. */
-                        STMin = 1;
-                    }
-                    else
-                    {
-                        STMin = 127;                                 //According to the ISO-TP
-                    }
-                    FWaitFlow = FALSE;                              // Don't wait for the flowcontrol anymore
-
-                    omMainWnd->SendContinuosFrames(  omMainWnd->psTxCanMsgUds->m_psTxMsg->m_ucData,omMainWnd->psTxCanMsgUds,omMainWnd->fInterface );
-
-                }
-                break;
-                case 1:
-                {
-                    omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);                 // Wait,ReStart Timer -> do not able the SEND button yet
-                    omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time , NULL);
-                }
-                break;
-                default:                    // If I've received any reserved message or  an Overflow message.
-                {
-                    FWaitFlow = FALSE;      // To indicate that I should not receive a new flow control
-                }                   // If it's -1 then it's not a flow control message
-                //do nothing
-            }
-
-        }
-        else if(TypeofFrame ==  LONG_RESPONSE)           //Is it a long response??
-        {
-
-            int TempValue = strtol(CurrentService, NULL, 16);
-            int ffData = 6 - aux_Finterface;
-            int sidPos = initialByte + 2;
-            /* ISO 15765-2 FF with a 32-bit length: 10 00 + 4 length bytes + data. */
-            if (psMsg[initialByte] == 0x10 && psMsg[initialByte + 1] == 0x00
-                    && Datalen >= (unsigned char)(initialByte + 7))
-            {
-                unsigned int len32 = ((unsigned int)psMsg[initialByte + 2] << 24)
-                                     | ((unsigned int)psMsg[initialByte + 3] << 16)
-                                     | ((unsigned int)psMsg[initialByte + 4] << 8)
-                                     | (unsigned int)psMsg[initialByte + 5];
-                Length_Received = (float)len32;
-                ffData = (int)Datalen - 6 - aux_Finterface;
-                if (ffData < 1)
-                {
-                    ffData = 1;
-                }
-                sidPos = initialByte + 6;
-            }
-            else
-            {
-                Length_Received = (float)(((psMsg[initialByte] & 0x0F) << 8) | psMsg[initialByte + 1]);
-                ffData = (Datalen > 8) ? ((int)Datalen - 2 - aux_Finterface) : (6 - aux_Finterface);
-            }
-            if (sidPos < Datalen && psMsg[sidPos] == (unsigned char)(TempValue + 0x40))
-            {
-                omManagerPtr->numberOfBytes =1;
-                int cfSize = (Datalen > 8) ? ((int)Datalen - 1 - aux_Finterface) : (7 - aux_Finterface);
-                if (cfSize < 1)
-                {
-                    cfSize = 1;
-                }
-                int remain = (int)Length_Received - ffData;
-                if (remain < 0)
-                {
-                    remain = 0;
-                }
-                TotalFrames = (float)remain / (float)cfSize;
-                LengthLastFrame = remain % cfSize;
-                BeginLongResponse((int)Length_Received);
-                if (Datalen > sidPos)
-                {
-                    AppendLongResponse(psMsg + sidPos, Datalen - sidPos);
-                }
-                omMainWnd->PrepareFlowControl();
-                PublishLongResponse(FALSE);
-                omMainWnd->SetResponseService(NegRespManager->evaluateResp(psMsg , sidPos - 1));
-                omMainWnd->m_omSendButton.EnableWindow(FALSE);
-                m_nTimer = omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time /*TIME_UNABLE_SEND_BUTTON*/, NULL);
-            }
-
-        }
-        else if(TypeofFrame== CONSECUTIVE_FRAME)                          //Is it a consecutive Frame?
-        {
-            Counter_BSize--;
-            TotalFrames--;
-            if (((int)g_longGot & 31) == 0 || TotalFrames <= 0)
-            {
-                omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
-                omMainWnd->SetTimer(ID_TIMER_SEND_BUTTON,P2_Time , NULL);
-            }
-
-            if(TotalFrames==0)                       //It enters here when the last frame has exactly 7/6 bytes of data
-            {
-                FSending = FALSE;                    //Stops showing the bytes in the mainWnd
-                omMainWnd->m_omSendButton.EnableWindow(TRUE);
-                omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
-
-            }
-            else if(TotalFrames<0)                   //It enters here when the last frame has less than 7/6 bytes of data
-            {
-                Datalen = LengthLastFrame+1+aux_Finterface;
-                FSending = FALSE;                    //Stops showing the bytes in the mainWnd
-                omMainWnd->KillTimer(ID_TIMER_SEND_BUTTON);
-                omMainWnd->m_omSendButton.EnableWindow(TRUE);
-            }
-            if (Datalen > (unsigned char)(initialByte + 1))
-            {
-                AppendLongResponse(psMsg + initialByte + 1, Datalen - (initialByte + 1));
-            }
-            PublishLongResponse(TotalFrames <= 0);
-            if (TotalFrames <= 0 && omMainWnd != NULL)
-            {
-                omMainWnd->TryAutoSendSecurityKeyFromResponse();
-            }
-            if(Counter_BSize ==0)
-            {
-                omMainWnd->PrepareFlowControl();    // If I've received BSize frames-> Send the flow control
-            }
-
-        }
-        else                                  // This case corresponds to a simple response
-        {
-            omManagerPtr->numberOfBytes =1;
-            FSending = FALSE;                 //Show this message and then Stop showing the bytes
-            int sfPci = initialByte;
-            int sfLen = psMsg[initialByte];
-            if (Datalen > 8 && psMsg[initialByte] == 0x00)
-            {
-                sfPci = initialByte + 1;
-                sfLen = psMsg[initialByte + 1];
-                Length_Received = (float)sfLen;
-            }
-            omMainWnd->m_omDiagService = NegRespManager->evaluateResp(psMsg , sfPci);         // Show the description of the Response
-            if(!FDontShow)
-            {
-                Length_Received, omManagerPtr->Show_ResponseData(psMsg ,(unsigned char)(sfLen + sfPci + 1), sfPci);
-                if (omMainWnd != NULL)
-                {
-                    omMainWnd->TryAutoSendSecurityKeyFromResponse();
-                }
-            }
-            FDontShow = FALSE;                // The nextFramme can be shown
-
-        }
-        if (TypeofFrame == LONG_RESPONSE || (TypeofFrame == CONSECUTIVE_FRAME && TotalFrames <= 0))
-        {
-            omMainWnd->m_omBytes.vSetValue(g_longTotal);
-        }
-        else if (TypeofFrame != CONSECUTIVE_FRAME)
-        {
-            omMainWnd->m_omBytes.vSetValue(Length_Received);
-        }
-    }
+    /* Assemble on this thread. Message Window and EvaluateMessage share the
+       PSDI read path — deferring CF assembly to the UI queue left the diag
+       window at "Receiving 6 / 4095" while the bus log already had all CFs. */
+    UdsClientHandleCan(Mensaje);
     return 0;
 }
 /**********************************************************************************************************
@@ -961,6 +1195,30 @@ USAGEMODE HRESULT DIL_UDS_ShowSettingWnd(HWND hParent)
     omSettingsWnd->ShowWindow(SW_SHOW);
     omSettingsWnd->SetForegroundWindow();
     return 0;
+}
+
+USAGEMODE void DIL_UDS_GetIsoTpParams(int* stMin, int* blockSize)
+{
+    if (stMin != NULL)
+    {
+        *stMin = SSTMin & 0xFF;
+    }
+    if (blockSize != NULL)
+    {
+        *blockSize = BSize & 0xFF;
+    }
+}
+
+USAGEMODE void DIL_UDS_SetIsoTpParams(int stMin, int blockSize)
+{
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    SSTMin = stMin & 0xFF;
+    BSize = blockSize & 0xFF;
+    if (omSettingsWnd != NULL && ::IsWindow(omSettingsWnd->GetSafeHwnd()))
+    {
+        omSettingsWnd->m_STMin.vSetValue(SSTMin);
+        omSettingsWnd->m_BSize.vSetValue(BSize);
+    }
 }
 
 //________________________________________________________________________________________________________________________________________________________________

@@ -442,11 +442,12 @@ void CUDSSettingsWnd::vInitializeUDSSettingsfFields()
     m_STMin.vSetBase(BASE_HEXADECIMAL);
     m_STMin.LimitText(2);
     m_STMin.vSetSigned(false);
-    m_STMin.vSetValue(0);
+    m_STMin.vSetValue(SSTMin);
 
     m_BSize.vSetBase(BASE_DECIMAL);
     m_BSize.vSetSigned(false);
-    m_BSize.vSetValue(0);
+    /* 0 = fastest (continuous CF). Use 32/64 if the adapter drops frames. */
+    m_BSize.vSetValue(BSize);
 
     m_S3Client.vSetBase( BASE_DECIMAL);
     m_S3Client.vSetSigned(false);
@@ -507,10 +508,10 @@ void CUDSSettingsWnd::OnCbnSelchangeComboInterface()
     {
         case INTERFACE_NORMAL_11:
         {
-            m_omReqCanID.vSetValue(0x700);
-            m_omRespCanID.vSetValue(0x708);
-            StringRespCanID= "708";
-            StringReqCanID= "700";
+            m_omReqCanID.vSetValue(0x7E0);
+            m_omRespCanID.vSetValue(0x7E8);
+            StringRespCanID= "7E8";
+            StringReqCanID= "7E0";
             m_omReqCanID. LimitText(3);
             m_omRespCanID. LimitText(3);
 
@@ -844,10 +845,10 @@ void CUDSSettingsWnd::OnDefaultValuesPressed()
     {
         case INTERFACE_NORMAL_11:
         {
-            m_omReqCanID.vSetValue(0x700);
-            m_omRespCanID.vSetValue(0x708);
-            StringRespCanID= "708";
-            StringReqCanID= "700";
+            m_omReqCanID.vSetValue(0x7E0);
+            m_omRespCanID.vSetValue(0x7E8);
+            StringRespCanID= "7E8";
+            StringReqCanID= "7E0";
             m_omCheckMsgDLC.SetCheck(BST_CHECKED);
             m_omFCLength.SetCurSel(1);
         }

@@ -97,6 +97,8 @@ enum
     DRIVER_CAN_VSCOM,
     DRIVER_CAN_IVIEW,
     DRIVER_CAN_ISOLAR,
+    DRIVER_CAN_CAEA_VC02,
+    DRIVER_CAN_CAEA_VC01,
     DIL_TOTAL,          // Its value must be <= MAX_DILS
     DAL_NONE            = ~0x0
 };
@@ -108,6 +110,8 @@ enum
     DRIVER_LIN_ETAS_BOA,
     DRIVER_LIN_PEAK_USB,
     DRIVER_LIN_KVASER,
+    DRIVER_LIN_CAEA_VC02,
+    DRIVER_LIN_CAEA_VC01,
     DIL_LIN_TOTAL,
     DAL_LIN_NONE            = ~0x0
 };
@@ -208,7 +212,7 @@ public:
     }
 };
 
-const int MAX_DILS = 16;
+const int MAX_DILS = 32;
 const int MAX_HW = 32;
 #define     MAX_DILNAME             32
 typedef DILINFO DILLIST[MAX_DILS];

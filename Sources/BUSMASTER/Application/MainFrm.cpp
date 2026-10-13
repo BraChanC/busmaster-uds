@@ -196,6 +196,9 @@ enum
     DRIVER_CAN_IVIEW,
     DRIVER_CAN_ISOLAR,
     DRIVER_CAN_ZLG_USB,
+    DRIVER_CAN_CAEA_VC02,
+    DRIVER_CAN_CAEA_VC01,
+    DRIVER_CAN_USBCAN,
     DIL_TOTAL,          // Its value must be <= MAX_DILS
     DAL_NONE = ~0x0
 };
@@ -7949,6 +7952,13 @@ static BOOL bCanFdHardwareSelected(const SCONTROLLER_DETAILS* details, int count
 void CMainFrame::vSyncUdsCanFdHardware()
 {
     DIL_UDS_SetCanFdAvailable(bCanFdHardwareSelected(m_asControllerDetails, m_nNumChannels));
+    int nCount = (m_nNumChannels > (int)defNO_OF_CHANNELS) ? (int)defNO_OF_CHANNELS : m_nNumChannels;
+    for (int i = 0; i < nCount; i++)
+    {
+        const SCONTROLLER_DETAILS& d = m_asControllerDetails[i];
+        DIL_UDS_SetChannelBitrate(i + 1, (UINT)atof(d.m_omStrBaudrate.c_str()),
+                                  d.m_unDataBitRate, d.m_bcanFDEnabled ? TRUE : FALSE);
+    }
 }
 
 void CMainFrame::OnCfgnUdsMainWnd()
@@ -7998,7 +8008,7 @@ void CMainFrame::OnCfgnUdsTransferWnd()
         GetICANDIL()->DILC_GetControllerParams(lParam, 0, NUMBER_HW);
     }
     vSyncUdsCanFdHardware();
-    DIL_UDS_ShowWnd(this->m_hWnd, (int)lParam);
+    DIL_UDS_PrepareWnd(this->m_hWnd, (int)lParam);
     DIL_UDS_ShowTransferWnd(this->m_hWnd);
 }
 /******************************************************************************/
@@ -11218,6 +11228,16 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
 
                     //xmlTextWriterSetIndent(pNodeDBFilePtr, 1);
                 }
+
+                int nStMin = 0, nBlockSize = 0;
+                DIL_UDS_GetIsoTpParams(&nStMin, &nBlockSize);
+                xmlNodePtr pUdsPtr = xmlNewNode(nullptr, BAD_CAST DEF_UDS_SETTINGS);
+                xmlAddChild(pNodePtr, pUdsPtr);
+                CString omStrVal;
+                omStrVal.Format("%d", nStMin);
+                xmlNewChild(pUdsPtr, nullptr, BAD_CAST DEF_UDS_STMIN, BAD_CAST(LPCSTR)omStrVal);
+                omStrVal.Format("%d", nBlockSize);
+                xmlNewChild(pUdsPtr, nullptr, BAD_CAST DEF_UDS_BS, BAD_CAST(LPCSTR)omStrVal);
             }
         }
         break;
@@ -12401,6 +12421,33 @@ int CMainFrame::nLoadXMLConfiguration()
                     g_pouDIL_CAN_Interface->DILC_SetConfigData(m_asControllerDetails,
                             sizeof(SCONTROLLER_DETAILS) * defNO_OF_CHANNELS);
                 }
+
+                int nUdsParams[2] = { 0, 0 };
+                const char* acUdsPaths[2] =
+                {
+                    "//BUSMASTER_CONFIGURATION/Module_Configuration/" DEF_UDS_SETTINGS "/" DEF_UDS_STMIN,
+                    "//BUSMASTER_CONFIGURATION/Module_Configuration/" DEF_UDS_SETTINGS "/" DEF_UDS_BS
+                };
+                for (int nParam = 0; nParam < 2 && m_xmlConfigFiledoc != nullptr; nParam++)
+                {
+                    pPathObject = xmlUtils::pGetNodes(m_xmlConfigFiledoc, (xmlChar*)acUdsPaths[nParam]);
+                    if (nullptr == pPathObject)
+                    {
+                        continue;
+                    }
+                    pNodeSet = pPathObject->nodesetval;
+                    if (pNodeSet != nullptr && pNodeSet->nodeNr > 0 && pNodeSet->nodeTab[0]->xmlChildrenNode != nullptr)
+                    {
+                        xmlChar* ptext = xmlNodeListGetString(m_xmlConfigFiledoc, pNodeSet->nodeTab[0]->xmlChildrenNode, 1);
+                        if (nullptr != ptext)
+                        {
+                            nUdsParams[nParam] = atoi((char*)ptext);
+                            xmlFree(ptext);
+                        }
+                    }
+                    xmlXPathFreeObject(pPathObject);
+                }
+                DIL_UDS_SetIsoTpParams(nUdsParams[0], nUdsParams[1]);
             }
             break;
             case FILTER_SECTION_ID:
@@ -13814,6 +13861,18 @@ INT CMainFrame::nGetControllerID(std::string strDriverName)
     {
         nDriverID = DRIVER_CAN_ZLG_USB;
     }
+    else if(strDriverName == "CAEA VC02")
+    {
+        nDriverID = DRIVER_CAN_CAEA_VC02;
+    }
+    else if(strDriverName == "CAEA VC01")
+    {
+        nDriverID = DRIVER_CAN_CAEA_VC01;
+    }
+    else if(strDriverName == "USBCAN")
+    {
+        nDriverID = DRIVER_CAN_USBCAN;
+    }
     else
     {
         nDriverID = DRIVER_CAN_STUB;
@@ -14222,6 +14281,7 @@ void CMainFrame::vSetDefaultConfiguration(eSECTION_ID eSecId)
             g_pouDIL_CAN_Interface->DILC_SetConfigData(m_asControllerDetails,
                     sizeof(SCONTROLLER_DETAILS) * defNO_OF_CHANNELS);
             //Set default settings
+            DIL_UDS_SetIsoTpParams(0, 0);
         }
         break;
         case GRAPH_SECTION_ID:

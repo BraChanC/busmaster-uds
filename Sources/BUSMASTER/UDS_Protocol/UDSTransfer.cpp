@@ -2,13 +2,23 @@
 #include "UDSTransfer.h"
 #include "UDSMainWnd.h"
 #include "resource.h"
+#include "UDS_Resource.h"
 #include "UDS_Extern.h"
 #include <stdio.h>
 
 extern CUDSMainWnd* omMainWnd;
+BOOL UdsClientLongRxPending();
+int UdsClientLongRxGot();
+int UdsClientLongRxTotal();
+BOOL UdsClientTakeRxError(CString& text);
+void UdsClientAbortLongRx();
 
 #define XFER_TIMER 1
 #define XFER_MAX   (16 * 1024 * 1024)
+#define XFER_RSP_TIMEOUT_MS 120000
+#define XFER_NCR_TIMEOUT_MS 1000
+#define XFER_LOG_LIMIT (1024u * 1024u)
+#define XFER_LOG_KEEP  (512 * 1024)
 
 enum XferPhase
 {
@@ -36,6 +46,7 @@ public:
         m_sentAt = 0;
         m_blockT0 = 0;
         m_rspLen = 0;
+        m_xferT0 = 0;
     }
 
 protected:
@@ -45,6 +56,7 @@ protected:
     virtual void PostNcDestroy();
     afx_msg void OnDestroy();
     afx_msg void OnTimer(UINT_PTR nIDEvent);
+    afx_msg LRESULT OnRspReady(WPARAM wParam, LPARAM lParam);
     afx_msg void OnBrowse();
     afx_msg void OnDownload();
     afx_msg void OnUpload();
@@ -52,6 +64,7 @@ protected:
     DECLARE_MESSAGE_MAP()
 
     void Log(const CString& text);
+    void Status(const CString& text);
     void SetBusy(BOOL busy);
     BOOL ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi, int& cap, unsigned& upSize);
     BOOL LoadFile(const CString& path);
@@ -64,6 +77,8 @@ protected:
     void Succeed(const CString& text);
     void UpdateProgress(int done, int total);
     CString NowStamp() const;
+    void StartClock();
+    CString ElapsedText(int bytes) const;
     void SendNextDownload();
     void SendNextUpload();
     void OnResponse();
@@ -77,6 +92,7 @@ protected:
     LONG m_waitSeq;
     DWORD m_sentAt;
     DWORD m_blockT0;
+    LONGLONG m_xferT0;
     BYTE m_rsp[8192];
     int m_rspLen;
     ULONGLONG m_addr;
@@ -91,6 +107,7 @@ static CUDSTransferWnd* g_pXfer = NULL;
 BEGIN_MESSAGE_MAP(CUDSTransferWnd, CDialog)
     ON_WM_DESTROY()
     ON_WM_TIMER()
+    ON_MESSAGE(WM_UDS_RSP_READY, OnRspReady)
     ON_BN_CLICKED(IDC_XFER_BROWSE, OnBrowse)
     ON_BN_CLICKED(IDC_XFER_DOWN, OnDownload)
     ON_BN_CLICKED(IDC_XFER_UP, OnUpload)
@@ -129,6 +146,7 @@ BOOL CUDSTransferWnd::OnInitDialog()
     }
     SetDlgItemText(IDC_XFER_STATUS, "Download sends 34/36/37. Upload sends 35/36/37. Open this page after Connect.");
     UpdateProgress(0, 0);
+    g_hUdsRspNotify = m_hWnd;
     return TRUE;
 }
 
@@ -195,6 +213,10 @@ void CUDSTransferWnd::OnCancel()
 
 void CUDSTransferWnd::OnDestroy()
 {
+    if (g_hUdsRspNotify == m_hWnd)
+    {
+        g_hUdsRspNotify = NULL;
+    }
     KillTimer(XFER_TIMER);
     FreeFile();
     CDialog::OnDestroy();
@@ -219,9 +241,31 @@ void CUDSTransferWnd::Log(const CString& text)
     {
         return;
     }
+    /* ReplaceSel silently drops text beyond the edit limit (32767 by default). */
+    if (pEdit->GetLimitText() < XFER_LOG_LIMIT)
+    {
+        pEdit->SetLimitText(XFER_LOG_LIMIT);
+    }
     int n = pEdit->GetWindowTextLength();
+    if (n + line.GetLength() > XFER_LOG_KEEP)
+    {
+        int cutLine = pEdit->LineFromChar(n - XFER_LOG_KEEP / 2);
+        int cut = pEdit->LineIndex(cutLine + 1);
+        if (cut > 0)
+        {
+            pEdit->SetSel(0, cut);
+            pEdit->ReplaceSel("");
+            n = pEdit->GetWindowTextLength();
+        }
+    }
     pEdit->SetSel(n, n);
     pEdit->ReplaceSel(line);
+}
+
+void CUDSTransferWnd::Status(const CString& text)
+{
+    Log(NowStamp() + "  " + text);
+    SetDlgItemText(IDC_XFER_STATUS, text);
 }
 
 void CUDSTransferWnd::SetBusy(BOOL busy)
@@ -229,6 +273,19 @@ void CUDSTransferWnd::SetBusy(BOOL busy)
     GetDlgItem(IDC_XFER_DOWN)->EnableWindow(!busy);
     GetDlgItem(IDC_XFER_UP)->EnableWindow(!busy);
     GetDlgItem(IDC_XFER_BROWSE)->EnableWindow(!busy);
+    /* Tester Present shares psTxCanMsgUds with Flow Control; a 3E during
+       ST_WAIT_FC aborts the server's 76 and leaves the client at 6/4095. */
+    if (omMainWnd != NULL && ::IsWindow(omMainWnd->GetSafeHwnd()))
+    {
+        if (busy)
+        {
+            omMainWnd->KillTimer(ID_TIMER_TP);
+        }
+        else if (omMainWnd->m_omCheckTP.GetCheck())
+        {
+            omMainWnd->StartTimer();
+        }
+    }
 }
 
 void CUDSTransferWnd::FreeFile()
@@ -288,7 +345,7 @@ BOOL CUDSTransferWnd::ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi,
     addr = _strtoui64((LPCTSTR)text, &end, 16);
     if (text.IsEmpty() || end == NULL || *end != 0)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Address must be hex");
+        Status("Address must be hex");
         return FALSE;
     }
     CComboBox* pAddr = (CComboBox*)GetDlgItem(IDC_XFER_ALEN);
@@ -306,7 +363,7 @@ BOOL CUDSTransferWnd::ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi,
     ULONGLONG addrMax = (addrN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (addrN * 8)) - 1ull);
     if (addr > addrMax)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Address does not fit in the address field");
+        Status("Address does not fit in the address field");
         return FALSE;
     }
     GetDlgItemText(IDC_XFER_DFI, text);
@@ -315,7 +372,7 @@ BOOL CUDSTransferWnd::ReadUi(ULONGLONG& addr, int& addrN, int& sizeN, BYTE& dfi,
     unsigned dfiV = strtoul((LPCTSTR)text, &end, 16);
     if (text.IsEmpty() || end == NULL || *end != 0 || dfiV > 0xFF)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "DFI must be one hex byte");
+        Status("DFI must be one hex byte");
         return FALSE;
     }
     dfi = (BYTE)dfiV;
@@ -344,20 +401,20 @@ BOOL CUDSTransferWnd::LoadFile(const CString& path)
     CFile file;
     if (!file.Open(path, CFile::modeRead | CFile::typeBinary))
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Cannot open the file");
+        Status("Cannot open the file");
         return FALSE;
     }
     ULONGLONG len = file.GetLength();
     if (len == 0 || len > XFER_MAX)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "File must be 1 byte to 16 MB");
+        Status("File must be 1 byte to 16 MB");
         return FALSE;
     }
     m_file = new BYTE[(size_t)len];
     if (file.Read(m_file, (UINT)len) != (UINT)len)
     {
         FreeFile();
-        SetDlgItemText(IDC_XFER_STATUS, "Cannot read the file");
+        Status("Cannot read the file");
         return FALSE;
     }
     m_fileLen = (int)len;
@@ -368,12 +425,13 @@ BOOL CUDSTransferWnd::SendHex(const CString& hex)
 {
     if (omMainWnd == NULL || !::IsWindow(omMainWnd->GetSafeHwnd()))
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Diagnostic window is not open");
+        Status("Diagnostic window is not open");
         return FALSE;
     }
     m_waitSeq = DIL_UDS_ResponseSeq();
+    /* PrepareDiagnosticMessage strips spaces itself and SetRequestPayload
+       sets the DLC, so OnEnChangeData (reformat with spaces) is skipped. */
     omMainWnd->SetRequestPayload(hex);
-    omMainWnd->OnEnChangeData();
     omMainWnd->OnBnClickedSendUD();
     m_sentAt = GetTickCount();
     SetTimer(XFER_TIMER, 50, NULL);
@@ -382,16 +440,61 @@ BOOL CUDSTransferWnd::SendHex(const CString& hex)
 
 BOOL CUDSTransferWnd::TakeResponse()
 {
+    CString rxErr;
+    if (UdsClientTakeRxError(rxErr))
+    {
+        Fail(rxErr);
+        return FALSE;
+    }
+    /* Do not advance while multi-frame 76 is still assembling. Only refresh
+       the watchdog when RX byte count progresses — otherwise allow timeout.
+       If stalled after FF (got==6) or mid-block, re-send Flow Control. */
+    if (UdsClientLongRxPending())
+    {
+        static int s_lastLongGot = -1;
+        static DWORD s_stallSince = 0;
+        static DWORD s_lastFcRetry = 0;
+        int got = UdsClientLongRxGot();
+        DWORD now = GetTickCount();
+        if (got != s_lastLongGot)
+        {
+            s_lastLongGot = got;
+            s_stallSince = now;
+            s_lastFcRetry = now;
+            m_sentAt = now;
+        }
+        else
+        {
+            /* Retry FC only when BS>0 (sender is waiting for another FC).
+               With BS=0 one FC after FF is enough; retrying floods 30 00. */
+            extern int BSize;
+            if (BSize > 0 && omMainWnd != NULL && (now - s_lastFcRetry) >= 400)
+            {
+                omMainWnd->PrepareFlowControl();
+                s_lastFcRetry = now;
+            }
+            if ((now - s_stallSince) >= XFER_NCR_TIMEOUT_MS)
+            {
+                CString text;
+                text.Format("ISO-TP N_Cr timeout: no CF for %lu ms after %d / %d bytes",
+                            now - s_stallSince, got, UdsClientLongRxTotal());
+                UdsClientAbortLongRx();
+                Fail(text);
+            }
+        }
+        return FALSE;
+    }
     if (DIL_UDS_ResponseSeq() == m_waitSeq)
     {
-        if (omMainWnd != NULL && omMainWnd->DatatoSend.GetLength() >= 2)
+        if (UdsClientTxBusy())
         {
             m_sentAt = GetTickCount();
             return FALSE;
         }
-        if (GetTickCount() - m_sentAt > 8000)
+        DWORD now = GetTickCount();
+        if (now - m_sentAt > XFER_RSP_TIMEOUT_MS)
         {
-            Fail("No response in 8 seconds");
+            Fail("No response in 120 seconds");
         }
         return FALSE;
     }
@@ -408,17 +511,49 @@ BOOL CUDSTransferWnd::TakeResponse()
     return TRUE;
 }
 
+void CUDSTransferWnd::StartClock()
+{
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    m_xferT0 = q.QuadPart;
+}
+
+CString CUDSTransferWnd::ElapsedText(int bytes) const
+{
+    if (m_xferT0 == 0)
+    {
+        return CString();
+    }
+    LARGE_INTEGER f, q;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&q);
+    double sec = (double)(q.QuadPart - m_xferT0) / (double)f.QuadPart;
+    CString text;
+    if (sec > 0.0 && bytes > 0)
+    {
+        text.Format(", total time %.3f s (%.2f KB/s)", sec, (double)bytes / 1024.0 / sec);
+    }
+    else
+    {
+        text.Format(", total time %.3f s", sec);
+    }
+    return text;
+}
+
 void CUDSTransferWnd::Fail(const CString& text)
 {
     KillTimer(XFER_TIMER);
+    UdsClientTxCancel();
     m_phase = PH_IDLE;
     SetBusy(FALSE);
     if (m_fileLen > 0)
     {
         UpdateProgress(m_off, m_fileLen);
     }
-    Log(text);
-    SetDlgItemText(IDC_XFER_STATUS, text);
+    CString full = text + ElapsedText(m_off);
+    m_xferT0 = 0;
+    Log(full);
+    SetDlgItemText(IDC_XFER_STATUS, full);
 }
 
 void CUDSTransferWnd::Succeed(const CString& text)
@@ -430,8 +565,10 @@ void CUDSTransferWnd::Succeed(const CString& text)
     {
         UpdateProgress(m_fileLen, m_fileLen);
     }
-    Log(text);
-    SetDlgItemText(IDC_XFER_STATUS, text);
+    CString full = text + ElapsedText(m_fileLen);
+    m_xferT0 = 0;
+    Log(full);
+    SetDlgItemText(IDC_XFER_STATUS, full);
 }
 
 void CUDSTransferWnd::SendNextDownload()
@@ -549,6 +686,13 @@ void CUDSTransferWnd::OnResponse()
     }
     if (m_phase == PH_DL_76)
     {
+        if (m_rspLen >= 2 && m_rsp[0] == 0x76
+                && m_rsp[1] != (BYTE)(m_seq & 0xFF))
+        {
+            m_waitSeq = DIL_UDS_ResponseSeq();
+            m_sentAt = GetTickCount();
+            return;
+        }
         if (m_rspLen < 2 || m_rsp[0] != 0x76 || m_rsp[1] != (BYTE)(m_seq & 0xFF))
         {
             Fail("Expected 76 with the same block sequence");
@@ -639,6 +783,14 @@ void CUDSTransferWnd::OnResponse()
     }
     if (m_phase == PH_UL_76)
     {
+        if (m_rspLen >= 2 && m_rsp[0] == 0x76
+                && m_rsp[1] != (BYTE)(m_seq & 0xFF))
+        {
+            /* Stale/duplicate 76 from Capture+Publish race — keep waiting. */
+            m_waitSeq = DIL_UDS_ResponseSeq();
+            m_sentAt = GetTickCount();
+            return;
+        }
         if (m_rspLen < 2 || m_rsp[0] != 0x76 || m_rsp[1] != (BYTE)(m_seq & 0xFF))
         {
             Fail("Expected 76 with the same block sequence");
@@ -711,6 +863,15 @@ void CUDSTransferWnd::OnTimer(UINT_PTR nIDEvent)
     OnResponse();
 }
 
+LRESULT CUDSTransferWnd::OnRspReady(WPARAM /*wParam*/, LPARAM /*lParam*/)
+{
+    if (m_phase != PH_IDLE && TakeResponse())
+    {
+        OnResponse();
+    }
+    return 0;
+}
+
 void CUDSTransferWnd::OnBrowse()
 {
     CFileDialog dlg(TRUE, "bin", NULL, OFN_HIDEREADONLY | OFN_FILEMUSTEXIST,
@@ -737,16 +898,20 @@ void CUDSTransferWnd::OnDownload()
     {
         if (m_path.IsEmpty())
         {
-            SetDlgItemText(IDC_XFER_STATUS, "Choose the file to download");
+            Status("Choose the file to download");
         }
         return;
     }
     ULONGLONG sizeMax = (m_sizeN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (m_sizeN * 8)) - 1ull);
     if ((ULONGLONG)m_fileLen > sizeMax)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "File length does not fit in the size field");
+        Status("File length does not fit in the size field");
         return;
     }
+    CString info;
+    info.Format("%s  Download file: %s, size %d bytes (%.2f KB)",
+                (LPCTSTR)NowStamp(), (LPCTSTR)m_path, m_fileLen, m_fileLen / 1024.0);
+    Log(info);
     CString req;
     req.Format("34%02X%02X%s%s", m_dfi, (m_sizeN << 4) | m_addrN,
                (LPCTSTR)Be(m_addr, m_addrN), (LPCTSTR)Be((ULONGLONG)m_fileLen, m_sizeN));
@@ -755,6 +920,7 @@ void CUDSTransferWnd::OnDownload()
     UpdateProgress(0, m_fileLen);
     m_phase = PH_DL_74;
     SetBusy(TRUE);
+    StartClock();
     if (!SendHex(req))
     {
         Fail("Send failed");
@@ -776,13 +942,13 @@ void CUDSTransferWnd::OnUpload()
     }
     if (upSize == 0 || upSize > XFER_MAX)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Upload size must be 1 byte to 16 MB");
+        Status("Upload size must be 1 byte to 16 MB");
         return;
     }
     ULONGLONG sizeMax = (m_sizeN >= 8) ? ~((ULONGLONG)0) : (((ULONGLONG)1 << (m_sizeN * 8)) - 1ull);
     if ((ULONGLONG)upSize > sizeMax)
     {
-        SetDlgItemText(IDC_XFER_STATUS, "Upload size does not fit in the size field");
+        Status("Upload size does not fit in the size field");
         return;
     }
     if (m_path.IsEmpty())
@@ -797,6 +963,10 @@ void CUDSTransferWnd::OnUpload()
         SetDlgItemText(IDC_XFER_FILE, m_path);
     }
     m_fileLen = (int)upSize;
+    CString info;
+    info.Format("%s  Upload file: %s, expected size %u bytes (%.2f KB)",
+                (LPCTSTR)NowStamp(), (LPCTSTR)m_path, upSize, upSize / 1024.0);
+    Log(info);
     CString req;
     req.Format("35%02X%02X%s%s", m_dfi, (m_sizeN << 4) | m_addrN,
                (LPCTSTR)Be(m_addr, m_addrN), (LPCTSTR)Be(upSize, m_sizeN));
@@ -805,6 +975,7 @@ void CUDSTransferWnd::OnUpload()
     UpdateProgress(0, m_fileLen);
     m_phase = PH_UL_75;
     SetBusy(TRUE);
+    StartClock();
     if (!SendHex(req))
     {
         Fail("Send failed");
@@ -830,13 +1001,16 @@ HRESULT UdsTransfer_Show(HWND hParent)
     if (g_pXfer == NULL)
     {
         g_pXfer = new CUDSTransferWnd();
-        CWnd* parent = CWnd::FromHandle(hParent);
-        if (!g_pXfer->Create(IDD_UDS_TRANSFER, parent))
+        /* An owned popup always stays above its owner, which would hide the
+           main window for the whole session; keep this window unowned. */
+        UNREFERENCED_PARAMETER(hParent);
+        if (!g_pXfer->Create(IDD_UDS_TRANSFER, CWnd::GetDesktopWindow()))
         {
             delete g_pXfer;
             g_pXfer = NULL;
             return E_FAIL;
         }
+        g_pXfer->ModifyStyleEx(0, WS_EX_APPWINDOW);
     }
     g_pXfer->ShowWindow(SW_SHOW);
     g_pXfer->SetForegroundWindow();

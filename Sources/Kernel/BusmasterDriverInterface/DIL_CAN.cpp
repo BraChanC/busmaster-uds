@@ -124,6 +124,9 @@ enum
     DRIVER_CAN_IVIEW,
     DRIVER_CAN_ISOLAR,
     DRIVER_CAN_ZLG_USB,
+    DRIVER_CAN_CAEA_VC02,
+    DRIVER_CAN_CAEA_VC01,
+    DRIVER_CAN_USBCAN,
     DIL_TOTAL,          // Its value must be <= MAX_DILS
     DAL_NONE = ~0x0
 };
@@ -148,6 +151,9 @@ static ENTRY_DIL sg_ListDIL[] =
     {DRIVER_CAN_VECTOR_XL,  "&Vector XL"        },
     {DRIVER_CAN_VSCOM,      "VScom &CAN-API"    },
     {DRIVER_CAN_ZLG_USB,    "&ZLG USBCANFD"     },
+    {DRIVER_CAN_CAEA_VC02,  "CAEA &VC02"        },
+    {DRIVER_CAN_CAEA_VC01,  "CAEA VC0&1"        },
+    {DRIVER_CAN_USBCAN,     "&USBCAN"           },
 };
 
 CDIL_CAN::CDIL_CAN()
@@ -276,7 +282,7 @@ DWORD CDIL_CAN::DILC_GetDILList(bool /*bAvailable*/, DILLIST* List)
 
     if (List != nullptr)
     {
-        for (int i = 0; i < sizeof(sg_ListDIL)/sizeof(ENTRY_DIL); i++)
+        for (int i = 0; i < (int)(sizeof(sg_ListDIL) / sizeof(ENTRY_DIL)) && i < 32; i++)
         {
             (*List)[i].m_acName = sg_ListDIL[i].m_acDIL;
             (*List)[i].m_dwDriverID = sg_ListDIL[i].m_dwDIL;
@@ -415,6 +421,13 @@ HRESULT CDIL_CAN::DILC_SelectDriver(DWORD dwDriverID, HWND hWndOwner)
             case DRIVER_CAN_ZLG_USB:
                 m_hDll = LoadLibrary("CAN_ZLG_USB.dll");
                 break;
+            case DRIVER_CAN_CAEA_VC02:
+            case DRIVER_CAN_CAEA_VC01:
+                m_hDll = LoadLibrary("CAN_CAEA_VC02.dll");
+                break;
+            case DRIVER_CAN_USBCAN:
+                m_hDll = LoadLibrary("CAN_USBCAN.dll");
+                break;
             case DAL_NONE:
                 DILC_PerformClosureOperations();
                 vSelectInterface_Dummy();
@@ -457,6 +470,14 @@ HRESULT CDIL_CAN::DILC_SelectDriver(DWORD dwDriverID, HWND hWndOwner)
                 return hResult;
             }
             pfGetIDILCAN_Controller((void**)&m_pBaseDILCAN_Controller);
+            {
+                typedef void (__cdecl *SET_CAEA_FAMILY)(int);
+                SET_CAEA_FAMILY setFamily = (SET_CAEA_FAMILY)GetProcAddress(m_hDll, "SetCaeaFamily");
+                if (setFamily != nullptr)
+                {
+                    setFamily(dwDriverID == DRIVER_CAN_CAEA_VC01 ? 1 : 2);
+                }
+            }
             if ( m_pBaseDILCAN_Controller )
             {
                 hResult = LoadCanControllerSafe(m_pBaseDILCAN_Controller, hWndOwner);

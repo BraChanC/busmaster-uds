@@ -14,6 +14,14 @@ const int NO_OF_CHAR_IN_BYTE = 2;
 /** Posted from the CAN read thread so UDS UI is updated on the window thread. */
 #define WM_UDS_EVALUATE_MSG (WM_APP + 0x51)
 #define WM_UDS_CONTINUE_CF  (WM_APP + 0x53)
+/** ISO-TP long RX UI refresh (assembly runs on the CAN read thread). */
+#define WM_UDS_LONG_RX_UI   (WM_APP + 0x54)
+/** Send Flow Control on the UI thread — never from the CAN read thread. */
+#define WM_UDS_SEND_FC      (WM_APP + 0x55)
+/** Consecutive-frame TX worker finished the request (wParam != 0: failed). */
+#define WM_UDS_CLI_TX_DONE  (WM_APP + 0x56)
+/** A diagnostic response was stored (DIL_UDS_ResponseSeq advanced). */
+#define WM_UDS_RSP_READY    (WM_APP + 0x57)
 
 
 /** Message Structure */

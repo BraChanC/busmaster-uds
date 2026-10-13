@@ -39,6 +39,8 @@ enum
     DRIVER_LIN_ETAS_BOA,
     DRIVER_LIN_PEAK_USB,
     DRIVER_LIN_KVASER,
+    DRIVER_LIN_CAEA_VC02,
+    DRIVER_LIN_CAEA_VC01,
     DIL_LIN_TOTAL,
     DAL_LIN_NONE = ~0x0
 };
@@ -60,6 +62,8 @@ static ENTRY_DIL sg_ListDIL[] =
     {DRIVER_LIN_PEAK_USB,"&PEAK USB"},
     {DRIVER_LIN_VECTOR_XL, "&Vector XL"},
     {DRIVER_LIN_KVASER, "&Kvaser LIN"},
+    {DRIVER_LIN_CAEA_VC02, "CAEA &VC02"},
+    {DRIVER_LIN_CAEA_VC01, "CAEA VC0&1"},
 };
 
 CDIL_LIN::CDIL_LIN()
@@ -133,7 +137,7 @@ DWORD CDIL_LIN::DILL_GetDILList(bool /*bAvailable*/, DILLIST* List)
 
     if (List != nullptr)
     {
-        for (int i = 0; i < sizeof(sg_ListDIL)/sizeof(ENTRY_DIL); i++)
+        for (int i = 0; i < (int)(sizeof(sg_ListDIL) / sizeof(ENTRY_DIL)) && i < 32; i++)
         {
             (*List)[i].m_acName = sg_ListDIL[i].m_acDIL;
             //_tcscpy((*List)[i].m_acName, sg_ListDIL[i].m_acDIL);
@@ -218,6 +222,10 @@ HRESULT CDIL_LIN::DILL_SelectDriver(DWORD dwDriverID, HWND hWndOwner)
             case DRIVER_LIN_KVASER:
                 m_hDll = LoadLibrary("LIN_Kvaser.dll");
                 break;
+            case DRIVER_LIN_CAEA_VC02:
+            case DRIVER_LIN_CAEA_VC01:
+                m_hDll = LoadLibrary("LIN_CAEA_VC02.dll");
+                break;
             default:
                 DILL_PerformClosureOperations();
                 vSelectInterface_Dummy();
@@ -242,6 +250,14 @@ HRESULT CDIL_LIN::DILL_SelectDriver(DWORD dwDriverID, HWND hWndOwner)
                 return hResult;
             }
             pfGetIDILLIN_Controller((void**)&m_pBaseDILLIN_Controller);
+            {
+                typedef void (__cdecl *SET_CAEA_FAMILY)(int);
+                SET_CAEA_FAMILY setFamily = (SET_CAEA_FAMILY)GetProcAddress(m_hDll, "SetCaeaFamily");
+                if (setFamily != nullptr)
+                {
+                    setFamily(dwDriverID == DRIVER_LIN_CAEA_VC01 ? 1 : 2);
+                }
+            }
             if ( m_pBaseDILLIN_Controller )
             {
                 // set the application parameters.

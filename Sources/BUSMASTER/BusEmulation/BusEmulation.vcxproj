@@ -123,7 +123,7 @@
     <Link>
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)DataTypes.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib" %(AdditionalOptions)</AdditionalOptions>
-      <OutputFile>$(SolutionDir)/BIN/$(OutDir)BusEmulation.exe</OutputFile>
+      <OutputFile>$(IntDir)BusEmulation.exe</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
@@ -138,7 +138,12 @@
     </Link>
     <PostBuildEvent>
       <Message>Performing registration</Message>
-      <Command>"$(SolutionDir)BIN/$(OutDir)BusEmulation.exe" /RegServer</Command>
+      <Command>if not exist "$(SolutionDir)BIN\$(OutDir)" mkdir "$(SolutionDir)BIN\$(OutDir)"
+copy /Y "$(IntDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe"
+if errorlevel 1 echo Warning: cannot open BusEmulation.exe for update. Build continues.
+if exist "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" /RegServer
+if errorlevel 1 echo Warning: BusEmulation /RegServer skipped. Build continues.
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -173,7 +178,7 @@
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)DataTypes.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>RpcRT4.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(SolutionDir)/BIN/$(OutDir)BusEmulation.exe</OutputFile>
+      <OutputFile>$(IntDir)BusEmulation.exe</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
@@ -191,7 +196,12 @@
     </Link>
     <PostBuildEvent>
       <Message>Performing registration</Message>
-      <Command>"$(SolutionDir)BIN/$(OutDir)BusEmulation.exe" /RegServer</Command>
+      <Command>if not exist "$(SolutionDir)BIN\$(OutDir)" mkdir "$(SolutionDir)BIN\$(OutDir)"
+copy /Y "$(IntDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe"
+if errorlevel 1 echo Warning: cannot open BusEmulation.exe for update. Build continues.
+if exist "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" /RegServer
+if errorlevel 1 echo Warning: BusEmulation /RegServer skipped. Build continues.
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='busmaster_debug|Win32'">
@@ -226,7 +236,7 @@
       <AdditionalOptions>"$(SolutionDir)/BIN/Libs/$(OutDir)DataTypes.lib"
 "$(SolutionDir)/BIN/Libs/$(OutDir)Utils.lib" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalDependencies>RpcRT4.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>$(SolutionDir)/BIN/$(OutDir)BusEmulation.exe</OutputFile>
+      <OutputFile>$(IntDir)BusEmulation.exe</OutputFile>
       <AdditionalLibraryDirectories>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
@@ -242,7 +252,12 @@
     </Link>
     <PostBuildEvent>
       <Message>Performing Registration</Message>
-      <Command>"$(SolutionDir)BIN/$(OutDir)BusEmulation.exe" /RegServer</Command>
+      <Command>if not exist "$(SolutionDir)BIN\$(OutDir)" mkdir "$(SolutionDir)BIN\$(OutDir)"
+copy /Y "$(IntDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe"
+if errorlevel 1 echo Warning: cannot open BusEmulation.exe for update. Build continues.
+if exist "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" "$(SolutionDir)BIN\$(OutDir)BusEmulation.exe" /RegServer
+if errorlevel 1 echo Warning: BusEmulation /RegServer skipped. Build continues.
+exit /b 0</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>

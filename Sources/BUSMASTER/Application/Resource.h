@@ -857,8 +857,8 @@
 #define IDC_RADIO_INTEL                 1306
 #define IDC_RADIO_MOTOROLA              1307
 #define IDC_EDIT_01                     1310
-#define IDC_SELECT_DRIVER               1311
-#define IDC_SELECT_DRIVER_END           1327
+#define IDC_SELECT_DRIVER               26000
+#define IDC_SELECT_DRIVER_END           26031
 #define IDC_COMBO_DISPLAY               1328
 #define IDC_STATIC_NOTICE               1328
 #define IDC_COMBO_LINE_DISPLAY          1329
@@ -912,7 +912,7 @@
 #define IDC_EDIT_FIBEX_PATH             1379
 #define IDC_SELECT_LIN_DRIVER           1380
 #define IDC_LIST_ECU                    1380
-#define IDC_SELECT_LIN_DRIVER_END       1385
+#define IDC_SELECT_LIN_DRIVER_END       1395
 #define IDI_ICON_NETWORKSTAT            3007
 #define IDB_J1939TXMSG                  10004
 #define DLG_TEMPLATE_LOCKING_KEY        13030

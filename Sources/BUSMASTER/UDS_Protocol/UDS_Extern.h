@@ -31,13 +31,20 @@ extern "C" {  // only need to export C interface if used by C++ source code
     //__declspec(dllexport) HRESULT DIL_UDS_ShowWnd(void); //Funci�n Para mostrar Main Window
 
     USAGEMODE HRESULT DIL_UDS_ShowWnd(HWND hParent,int TotalChannels);//; //Funci�n Para mostrar Main Window
+    /* Creates or updates the diagnostic window without showing it. */
+    USAGEMODE HRESULT DIL_UDS_PrepareWnd(HWND hParent, int TotalChannels);
     USAGEMODE void DIL_UDS_SetCanFdAvailable(BOOL available);
+    /* channel is 1-based; bit rates in bit/s. */
+    USAGEMODE void DIL_UDS_SetChannelBitrate(int channel, UINT nominalBps, UINT dataBps, BOOL canFd);
     USAGEMODE HRESULT EvaluateMessage( STCAN_MSG  Mensaje  );
     USAGEMODE HRESULT UpdateChannelUDS(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowSettingWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowServerWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowTransferWnd(HWND hParent);
+    /* ISO-TP flow-control parameters stored in the configuration file. */
+    USAGEMODE void DIL_UDS_GetIsoTpParams(int* stMin, int* blockSize);
+    USAGEMODE void DIL_UDS_SetIsoTpParams(int stMin, int blockSize);
     USAGEMODE LONG DIL_UDS_ResponseSeq();
     USAGEMODE int DIL_UDS_CopyResponse(BYTE* out, int cap);
     USAGEMODE HRESULT TX_vSetDILInterfacePtrUDS(void* ptrDILIntrf);

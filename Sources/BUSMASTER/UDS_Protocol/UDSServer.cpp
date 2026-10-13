@@ -16,6 +16,11 @@
 #define MAX_DATA        512
 #define MAX_PDU         4095
 #define MAX_XFER        (64 * 1024)
+/* Abort active 34/35/36 when the client stops; also abort ISO-TP WAIT_FC. */
+/* Idle with no 36/37; FC wait can be longer — client may be draining RX. */
+#define UDS_XFER_IDLE_MS 15000
+#define UDS_FC_WAIT_MS   30000
+#define UDS_TX_RETRY_MS  1000
 #define MAX_FILE        (16 * 1024 * 1024)
 static int g_loadCap = MAX_XFER;
 #define WM_UDS_SERVER_STATUS (WM_APP + 0x61)
@@ -98,7 +103,7 @@ struct TxJob
     int startOff;
     int seq;
     int bs;
-    int stMs;
+    int stUs;
     unsigned int id;
     unsigned char ext;
     unsigned char ch;
@@ -1338,6 +1343,7 @@ public:
         memset(m_rx, 0, sizeof(m_rx));
         memset(m_tx, 0, sizeof(m_tx));
         m_txHold = NULL;
+        m_publishPending = FALSE;
         m_parseHead = NULL;
         m_parseTail = NULL;
         m_parseLeft = 0;
@@ -1356,6 +1362,8 @@ public:
         m_xfSeq = 1;
         m_xfBlock = 128;
         m_xfSave[0] = 0;
+        m_xfLastTick = 0;
+        m_txWaitTick = 0;
     }
 
     ~CUdsServerEngine()
@@ -1387,6 +1395,7 @@ public:
         FreeXfer();
         delete[] m_txHold;
         m_txHold = NULL;
+        m_publishPending = FALSE;
     }
 
     void EnsureLoaded()
@@ -1722,18 +1731,104 @@ public:
             m_txOff = off;
             m_txSeq = seq;
             m_txState = ST_WAIT_FC;
+            m_txWaitTick = GetTickCount();
         }
         m_cs.Unlock();
     }
 
+    void ClearPublishPendingLocked()
+    {
+        m_publishPending = FALSE;
+    }
+
     void NoteTxDone(LONG gen)
     {
+        BYTE* pub = NULL;
+        int pubLen = 0;
         m_cs.Lock();
         if (m_activeGen == gen && m_txState == ST_SENDING)
         {
             m_txState = ST_IDLE;
+            m_txWaitTick = 0;
+            /* Publish only after the last CF is on the bus so Transfer
+               does not send the next 36 while this 76 is still running. */
+            if (m_publishPending && m_txLen > 0)
+            {
+                pubLen = m_txLen;
+                pub = new BYTE[pubLen];
+                memcpy(pub, (m_txHold != NULL) ? m_txHold : m_tx, pubLen);
+            }
+            m_publishPending = FALSE;
+            if (m_xfMode != 0)
+            {
+                m_xfLastTick = GetTickCount();
+            }
         }
         m_cs.Unlock();
+        if (pub != NULL)
+        {
+            UdsPublishServerResponse(pub, pubLen);
+            delete[] pub;
+        }
+    }
+
+    void AbortTransferLocked(const char* reason)
+    {
+        BOOL busy = (m_xfMode != 0) || (m_txState != ST_IDLE);
+        if (m_txState != ST_IDLE)
+        {
+            InterlockedIncrement(&m_txGen);
+            m_txState = ST_IDLE;
+            m_txWaitTick = 0;
+            ClearPublishPendingLocked();
+        }
+        FreeXfer();
+        if (busy && reason != NULL && reason[0] != 0)
+        {
+            PostStatus(reason);
+        }
+    }
+
+    void AbortTransfer(const char* reason)
+    {
+        m_cs.Lock();
+        AbortTransferLocked(reason != NULL ? reason : "Transfer aborted");
+        m_cs.Unlock();
+    }
+
+    void PollTimeouts()
+    {
+        char msg[96];
+        msg[0] = 0;
+        m_cs.Lock();
+        DWORD now = GetTickCount();
+        if (m_txState == ST_WAIT_FC && m_txWaitTick != 0
+                && (now - m_txWaitTick) >= UDS_FC_WAIT_MS)
+        {
+            InterlockedIncrement(&m_txGen);
+            m_txState = ST_IDLE;
+            m_txWaitTick = 0;
+            ClearPublishPendingLocked();
+            _snprintf(msg, sizeof(msg), "ISO-TP TX aborted (no Flow Control in %d ms)",
+                      UDS_FC_WAIT_MS);
+            msg[sizeof(msg) - 1] = 0;
+        }
+        if (m_xfMode != 0 && m_txState == ST_IDLE && m_xfLastTick != 0
+                && (now - m_xfLastTick) >= UDS_XFER_IDLE_MS)
+        {
+            FreeXfer();
+            if (msg[0] == 0)
+            {
+                _snprintf(msg, sizeof(msg),
+                          "Transfer aborted (no 36/37 in %d ms)", UDS_XFER_IDLE_MS);
+                msg[sizeof(msg) - 1] = 0;
+            }
+        }
+        m_cs.Unlock();
+        if (msg[0] != 0)
+        {
+            PostStatus(msg);
+        }
     }
 
 private:
@@ -2267,7 +2362,6 @@ private:
             _snprintf(act.log, sizeof(act.log), "%s", log);
             act.log[sizeof(act.log) - 1] = 0;
         }
-        UdsPublishServerResponse(resp, rlen);
         int txDlc = g_udsCanFd ? g_udsFdDlc : 8;
         if (txDlc < 8)
         {
@@ -2276,10 +2370,14 @@ private:
         int sfMax = (txDlc > 8) ? (txDlc - 2) : 7;
         if (rlen <= sfMax)
         {
+            UdsPublishServerResponse(resp, rlen);
+            m_publishPending = FALSE;
             FillSf(act.frame, resp, rlen, useCh);
             act.hasFrame = TRUE;
             return;
         }
+        /* Multi-frame: publish when NoteTxDone fires (last CF sent). */
+        m_publishPending = TRUE;
         int sent = FillFf(act.frame, resp, rlen, useCh);
         if (rlen <= MAX_XFER)
         {
@@ -2298,6 +2396,7 @@ private:
         m_txSeq = 1;
         m_txCh = useCh;
         m_txState = ST_WAIT_FC;
+        m_txWaitTick = GetTickCount();
         act.hasFrame = TRUE;
     }
 
@@ -2700,6 +2799,12 @@ private:
         m_xfMode = 0;
         m_xfSeq = 1;
         m_xfSave[0] = 0;
+        m_xfLastTick = 0;
+    }
+
+    void TouchXferLocked()
+    {
+        m_xfLastTick = GetTickCount();
     }
 
     BOOL ReadWholeFile(const char* path, BYTE** out, int* outLen)
@@ -2870,6 +2975,7 @@ public:
         {
             return FALSE;
         }
+        TouchXferLocked();
         if (sid == 0x34 || sid == 0x35)
         {
             unsigned addr = 0;
@@ -2897,6 +3003,7 @@ public:
                 m_xfSize = (int)size;
                 m_xfMode = 1;
                 m_xfSeq = 1;
+                TouchXferLocked();
                 strncpy_s(m_xfSave, m_dlPath, _TRUNCATE);
                 char log[120];
                 _snprintf(log, sizeof(log), "RX 34 addr %X size %u", addr, size);
@@ -2916,6 +3023,7 @@ public:
             m_xfSize = (int)size;
             m_xfMode = 2;
             m_xfSeq = 1;
+            TouchXferLocked();
             char log[120];
             _snprintf(log, sizeof(log), "RX 35 addr %X size %u", addr, size);
             log[sizeof(log) - 1] = 0;
@@ -3009,13 +3117,30 @@ public:
 
     void OnPduLocked(const BYTE* pdu, int len, unsigned char ch, OutAct& act)
     {
+        /* Root cause of "Receiving 6/4095" hang: any new SF (often 3E Tester
+           Present) used to cancel an in-flight multi-frame 76. The client had
+           already accepted the FF; further Flow Controls were ignored because
+           m_txState was no longer ST_WAIT_FC. */
+        if (len >= 1 && pdu[0] == 0x3E
+                && (m_txState == ST_WAIT_FC || m_txState == ST_SENDING))
+        {
+            _snprintf(act.log, sizeof(act.log),
+                      "RX 3E ignored during ISO-TP TX (keep transfer alive)");
+            act.log[sizeof(act.log) - 1] = 0;
+            return;
+        }
         m_activeGen = InterlockedIncrement(&m_txGen);
         m_txState = ST_IDLE;
+        ClearPublishPendingLocked();
         if (len >= 1 && pdu[0] == 0x10)
         {
             m_unlocked = FALSE;
             m_keyFails = 0;
             m_pendingLen = 0;
+            if (m_xfMode != 0)
+            {
+                AbortTransferLocked("Transfer aborted by DiagnosticSessionControl");
+            }
         }
         if (len >= 1 && pdu[0] == 0x27 && m_unlockWrite)
         {
@@ -3140,17 +3265,19 @@ public:
         }
     }
 
-    static int DecodeSt(BYTE s)
+    /* ISO 15765-2 STmin in microseconds: 00-7F = 0-127 ms, F1-F9 = 100-900 us,
+       reserved values are treated as the maximum 127 ms. */
+    static int DecodeStUs(BYTE s)
     {
         if (s <= 0x7F)
         {
-            return (int)s;
+            return (int)s * 1000;
         }
         if (s >= 0xF1 && s <= 0xF9)
         {
-            return 1;
+            return (int)(s - 0xF0) * 100;
         }
-        return 0;
+        return 127000;
     }
 
     void OnFlowLocked(const BYTE* d, int dlc, OutAct& act)
@@ -3158,12 +3285,14 @@ public:
         if (dlc < 3 || m_txLen <= m_txOff)
         {
             m_txState = ST_IDLE;
+            ClearPublishPendingLocked();
             return;
         }
         int fs = d[0] & 0x0F;
         if (fs == 2)
         {
             m_txState = ST_IDLE;
+            ClearPublishPendingLocked();
             _snprintf(act.log, sizeof(act.log), "ISO-TP aborted by tester");
             act.log[sizeof(act.log) - 1] = 0;
             return;
@@ -3183,11 +3312,23 @@ public:
         job->startOff = m_txOff;
         job->seq = m_txSeq;
         job->bs = d[1];
-        job->stMs = DecodeSt(d[2]);
+        /* The receiver's STmin is a lower bound; the server's own STmin setting
+           additionally limits how fast CFs are queued into the CAN driver. */
+        job->stUs = DecodeStUs(d[2]);
+        int ownUs = DecodeStUs((BYTE)(SSTMin & 0xFF));
+        if (ownUs > job->stUs)
+        {
+            job->stUs = ownUs;
+        }
         job->id = m_respId;
         job->ext = m_ext ? 1 : 0;
         job->ch = m_txCh;
         m_txState = ST_SENDING;
+        m_txWaitTick = 0;
+        if (m_xfMode != 0)
+        {
+            m_xfLastTick = GetTickCount();
+        }
         act.job = job;
     }
 
@@ -3225,9 +3366,24 @@ public:
         {
             ch = 1;
         }
-        if (type == 3 && m_txState == ST_WAIT_FC)
+        if (type == 3)
         {
-            OnFlowLocked(d, dlc, act);
+            /* Ignore FC while already streaming CFs — duplicate 30 00 from
+               the client must not start another TxThread. */
+            if (m_txState == ST_SENDING)
+            {
+                return;
+            }
+            /* Resume if we still have unsent response bytes but left WAIT_FC. */
+            if (m_txState == ST_IDLE && m_txLen > m_txOff && m_publishPending)
+            {
+                m_txState = ST_WAIT_FC;
+                m_txWaitTick = GetTickCount();
+            }
+            if (m_txState == ST_WAIT_FC)
+            {
+                OnFlowLocked(d, dlc, act);
+            }
             return;
         }
         if (type == 0)
@@ -3410,6 +3566,7 @@ public:
     int m_txState;
     BYTE m_tx[MAX_XFER];
     BYTE* m_txHold;
+    BOOL m_publishPending;
     BOOL m_unlockWrite;
     char m_dll[MAX_PATH];
     char m_variant[64];
@@ -3437,6 +3594,8 @@ public:
     int m_xfSeq;
     int m_xfBlock;
     char m_xfSave[MAX_PATH];
+    DWORD m_xfLastTick;
+    DWORD m_txWaitTick;
     CVectorSeedKeyDll m_seedDll;
     struct FileCache
     {
@@ -3656,8 +3815,11 @@ static unsigned __stdcall TxThread(void* param)
     int off = job->startOff;
     int seq = job->seq;
     int inBlock = 0;
-    BOOL failed = FALSE;
     CUdsServerEngine& engine = Engine();
+    LARGE_INTEGER qpf, qLast, qNow;
+    QueryPerformanceFrequency(&qpf);
+    qLast.QuadPart = 0;
+    LONGLONG stTicks = (LONGLONG)job->stUs * qpf.QuadPart / 1000000;
     while (off < job->len)
     {
         if (engine.CurrentGen() != job->gen)
@@ -3670,9 +3832,27 @@ static unsigned __stdcall TxThread(void* param)
             FreeJob(job);
             return 0;
         }
-        if (inBlock > 0 && job->stMs > 0)
+        /* STmin is measured between CF submissions; Sleep() alone is too
+           coarse for sub-ms values, so finish the wait by spinning on QPC. */
+        if (inBlock > 0 && stTicks > 0)
         {
-            Sleep((DWORD)job->stMs);
+            for (;;)
+            {
+                QueryPerformanceCounter(&qNow);
+                LONGLONG left = qLast.QuadPart + stTicks - qNow.QuadPart;
+                if (left <= 0)
+                {
+                    break;
+                }
+                if (left * 1000 / qpf.QuadPart >= 3)
+                {
+                    Sleep(1);
+                }
+                else
+                {
+                    YieldProcessor();
+                }
+            }
         }
         if (engine.CurrentGen() != job->gen)
         {
@@ -3707,15 +3887,34 @@ static unsigned __stdcall TxThread(void* param)
         msg.m_ucDataLen = (unsigned char)txDlc;
         msg.m_ucData[0] = (BYTE)(0x20 | (seq & 0x0F));
         memcpy(&msg.m_ucData[1], job->data + off, n);
-        if (engine.SendFrame(msg) != S_OK && !failed)
+        /* A failed write (e.g. driver TX queue full) must not advance off/SN:
+           skipping a CF leaves the receiver short of bytes forever. Retry
+           the same CF; give up only after UDS_TX_RETRY_MS. */
+        HRESULT hr = engine.SendFrame(msg);
+        if (hr != S_OK)
         {
-            failed = TRUE;
-            PostStatus("Diagnostic server send failed");
+            DWORD t0 = GetTickCount();
+            int tries = 0;
+            while (hr != S_OK && engine.CurrentGen() == job->gen
+                    && (GetTickCount() - t0) < UDS_TX_RETRY_MS)
+            {
+                Sleep(tries < 16 ? 0 : 1);
+                tries++;
+                hr = engine.SendFrame(msg);
+            }
+            if (hr != S_OK)
+            {
+                PostStatus("ISO-TP TX aborted: CAN send kept failing");
+                break;
+            }
         }
+        QueryPerformanceCounter(&qLast);
         off += n;
         seq = (seq + 1) & 0x0F;
         inBlock++;
-        if (job->stMs == 0 && (inBlock & 63) == 0)
+        /* STmin=0: yield occasionally so the UI/RX thread can run, without
+           the old 1 ms-per-CF floor that made BS=8 transfers crawl. */
+        if (job->stUs == 0 && (inBlock & 31) == 0)
         {
             Sleep(0);
         }
@@ -3773,9 +3972,11 @@ protected:
     afx_msg void OnBrowseDll();
     afx_msg void OnBrowseXferDl();
     afx_msg void OnBrowseXferUl();
+    afx_msg void OnAbortXfer();
     afx_msg void OnSidChanged();
     afx_msg void OnHeaderChanged();
     afx_msg void OnItemChanged(NMHDR* pNMHDR, LRESULT* pResult);
+    afx_msg void OnTimer(UINT_PTR nIDEvent);
     afx_msg LRESULT OnStatusMsg(WPARAM wParam, LPARAM lParam);
     DECLARE_MESSAGE_MAP()
 
@@ -3812,6 +4013,7 @@ static CUDSServerWnd* g_pWnd = NULL;
 
 BEGIN_MESSAGE_MAP(CUDSServerWnd, CDialog)
     ON_WM_DESTROY()
+    ON_WM_TIMER()
     ON_BN_CLICKED(IDC_SVR_ADD, OnAdd)
     ON_BN_CLICKED(IDC_SVR_UPD, OnUpdate)
     ON_BN_CLICKED(IDC_SVR_DEL, OnDelete)
@@ -3824,6 +4026,7 @@ BEGIN_MESSAGE_MAP(CUDSServerWnd, CDialog)
     ON_BN_CLICKED(IDC_SVR_XFER, OnHeaderChanged)
     ON_BN_CLICKED(IDC_SVR_XDLBROWSE, OnBrowseXferDl)
     ON_BN_CLICKED(IDC_SVR_XULBROWSE, OnBrowseXferUl)
+    ON_BN_CLICKED(IDC_SVR_XABORT, OnAbortXfer)
     ON_EN_KILLFOCUS(IDC_SVR_XADDR, OnHeaderChanged)
     ON_EN_KILLFOCUS(IDC_SVR_XBLOCK, OnHeaderChanged)
     ON_EN_KILLFOCUS(IDC_SVR_XDL, OnHeaderChanged)
@@ -3882,8 +4085,22 @@ BOOL CUDSServerWnd::OnInitDialog()
     {
         SetDlgItemText(IDC_SVR_STATUS, "Diagnostic server is idle");
     }
+    SetTimer(ID_TIMER_SVR_POLL, 500, NULL);
     m_bReady = TRUE;
     return TRUE;
+}
+
+void CUDSServerWnd::OnTimer(UINT_PTR nIDEvent)
+{
+    if (nIDEvent == ID_TIMER_SVR_POLL)
+    {
+        Engine().PollTimeouts();
+    }
+}
+
+void CUDSServerWnd::OnAbortXfer()
+{
+    Engine().AbortTransfer("Transfer aborted by user");
 }
 
 void CUDSServerWnd::LoadHeader()
@@ -4880,6 +5097,7 @@ LRESULT CUDSServerWnd::OnStatusMsg(WPARAM /*wParam*/, LPARAM lParam)
 
 void CUDSServerWnd::OnDestroy()
 {
+    KillTimer(ID_TIMER_SVR_POLL);
     if (m_bReady)
     {
         ApplyHeader();
