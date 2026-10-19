@@ -1363,85 +1363,88 @@ USAGEMODE HRESULT TX_vSetDILInterfacePtrUDS(void* ptrDILIntrf)
 
 void CUDS_Protocol::UpdateFields()
 {
-    if(omMainWnd!=NULL)
+    if (omMainWnd == NULL || !::IsWindow(omMainWnd->GetSafeHwnd()))
     {
-        omMainWnd->fInterface =fInterface;
-        switch (fInterface)
-        {
-            case INTERFACE_NORMAL_11:
-            {
-                omMainWnd->CanID = MsgID;
-                omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
-                omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
-                omMainWnd->m_omSourceAddress.SetReadOnly(FALSE);
-                omMainWnd->m_omTargetAddress.SetReadOnly(FALSE);
-                omMainWnd->m_omCanID.SetReadOnly(FALSE);
-                omMainWnd->m_omCanID.vSetValue(MsgID);
-            }
-            break;
-            case INTERFACE_EXTENDED_11:
-            {
-                omMainWnd->CanID =MsgID;
-                omMainWnd->m_omSourceAddress.SetReadOnly(FALSE);
-                omMainWnd->m_omTargetAddress.SetReadOnly(FALSE);
-                omMainWnd->m_omSourceAddress.SetLimitText(2);
-                omMainWnd->m_omTargetAddress.SetLimitText(2);
-                if(MsgID ==0)
-                {
-                    omMainWnd->m_omSourceAddress.vSetValue(0);
-                    omMainWnd->m_omTargetAddress.vSetValue(0);
-                }
-                SourceAddress = omMainWnd->m_omSourceAddress.lGetValue();
-                TargetAddress = omMainWnd->m_omTargetAddress.lGetValue();
-
-                int MsgID2 =    SourceAddress + MsgID;       // This is necessary to set the proper CAN ID when the user has recently select the
-                omMainWnd->m_omCanID.vSetValue(MsgID2);      // the option Extended addressing in the Interface Combo Box.
-                respID = TargetAddress + RespMsgID;
-            }
-            break;
-            case INTERFACE_NORMAL_ISO_29:
-            {
-                omMainWnd->CanID = MsgID;
-                omMainWnd->m_omSourceAddress.SetLimitText(3);
-                omMainWnd->m_omTargetAddress.SetLimitText(3);
-                omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
-                omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
-                omMainWnd->m_omSourceAddress.SetReadOnly(false);
-                omMainWnd->m_omTargetAddress.SetReadOnly(false);
-                //omMainWnd->m_omCanID.vSetValue(MsgID);
-            }
-            break;
-            case INTERFACE_NORMAL_J1939_29:
-            {
-                omMainWnd->CanID = MsgID;
-                omMainWnd->m_omSourceAddress.SetLimitText(2);
-                omMainWnd->m_omTargetAddress.SetLimitText(2);
-                omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
-                omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
-                omMainWnd->m_omSourceAddress.SetReadOnly(false);
-                omMainWnd->m_omTargetAddress.SetReadOnly(false);
-                //omMainWnd->m_omCanID.vSetValue(MsgID);
-            }
-            break;
-        }
-        /*
-        ########################### Casian ##############################
-
-        if( omMainWnd->CanID == 0 || SourceAddress==TargetAddress)
-        {
-            omMainWnd->m_omSendButton.EnableWindow(FALSE);
-            omMainWnd->m_omCanID.vSetValue(0);
-
-        }
-        else
-        {
-            omMainWnd->m_omSendButton.EnableWindow(TRUE);
-        }
-        ########################### Casian ##############################
-        */
+        return;
     }
 
+    /* Control EN_CHANGE handlers call SyncToProtocol() which copies MainWnd
+       SA/TA into the protocol. If members are still stale when the first
+       edit is written, that write-back corrupts protocol and the next
+       vSetValue paints the old Source/Target Address (Settings Req/Resp
+       ID never appear on the main diagnostic page). */
+    const int nSavedRespId = respID;
+    omMainWnd->fInterface = fInterface;
+    omMainWnd->CanID = MsgID;
+    if (fInterface != INTERFACE_EXTENDED_11)
+    {
+        omMainWnd->SourceAddress = SourceAddress;
+        omMainWnd->TargetAddress = TargetAddress;
+    }
 
+    switch (fInterface)
+    {
+        case INTERFACE_NORMAL_11:
+        {
+            omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
+            omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
+            omMainWnd->m_omSourceAddress.SetReadOnly(FALSE);
+            omMainWnd->m_omTargetAddress.SetReadOnly(FALSE);
+            omMainWnd->m_omCanID.SetReadOnly(FALSE);
+            omMainWnd->m_omCanID.vSetValue(MsgID);
+        }
+        break;
+        case INTERFACE_EXTENDED_11:
+        {
+            omMainWnd->m_omSourceAddress.SetReadOnly(FALSE);
+            omMainWnd->m_omTargetAddress.SetReadOnly(FALSE);
+            omMainWnd->m_omSourceAddress.SetLimitText(2);
+            omMainWnd->m_omTargetAddress.SetLimitText(2);
+            if (MsgID == 0)
+            {
+                omMainWnd->m_omSourceAddress.vSetValue(0);
+                omMainWnd->m_omTargetAddress.vSetValue(0);
+            }
+            SourceAddress = omMainWnd->m_omSourceAddress.lGetValue();
+            TargetAddress = omMainWnd->m_omTargetAddress.lGetValue();
+            omMainWnd->SourceAddress = SourceAddress;
+            omMainWnd->TargetAddress = TargetAddress;
+
+            int MsgID2 = SourceAddress + MsgID;       // This is necessary to set the proper CAN ID when the user has recently select the
+            omMainWnd->m_omCanID.vSetValue(MsgID2);      // the option Extended addressing in the Interface Combo Box.
+            respID = TargetAddress + RespMsgID;
+        }
+        break;
+        case INTERFACE_NORMAL_ISO_29:
+        {
+            omMainWnd->m_omSourceAddress.SetLimitText(3);
+            omMainWnd->m_omTargetAddress.SetLimitText(3);
+            omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
+            omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
+            omMainWnd->m_omSourceAddress.SetReadOnly(false);
+            omMainWnd->m_omTargetAddress.SetReadOnly(false);
+            //omMainWnd->m_omCanID.vSetValue(MsgID);
+        }
+        break;
+        case INTERFACE_NORMAL_J1939_29:
+        {
+            omMainWnd->m_omSourceAddress.SetLimitText(2);
+            omMainWnd->m_omTargetAddress.SetLimitText(2);
+            omMainWnd->m_omSourceAddress.vSetValue(SourceAddress);
+            omMainWnd->m_omTargetAddress.vSetValue(TargetAddress);
+            omMainWnd->m_omSourceAddress.SetReadOnly(false);
+            omMainWnd->m_omTargetAddress.SetReadOnly(false);
+            //omMainWnd->m_omCanID.vSetValue(MsgID);
+        }
+        break;
+    }
+    /* OnEnChangeCanID auto-derives respID (e.g. Req+8); keep Settings value. */
+    if (fInterface == INTERFACE_NORMAL_11
+        || fInterface == INTERFACE_NORMAL_ISO_29
+        || fInterface == INTERFACE_NORMAL_J1939_29)
+    {
+        respID = nSavedRespId;
+    }
 }
 
 /**********************************************************************************************************
