@@ -1193,11 +1193,12 @@ void CMsgFrmtWnd::OnTimer(UINT nIDEvent)
                 //item count in VFSE buffer
                 nBuffMsgCnt = m_omMgsIndexVec.size();
             }
-            /* Overwrite: row count stays constant so SetItemCountEx alone may
-               not repaint. Redraw visible rows and bump GetDispInfo generation. */
-            m_lstMsg.SetItemCountEx(nBuffMsgCnt, LVSICF_NOSCROLL);
+            /* Append: normal SetItemCountEx. Overwrite: same row count needs
+               generation bump + Invalidate + RedrawItems for live update. */
+            m_lstMsg.SetItemCountEx(nBuffMsgCnt);
             vUpdatePtrInLstCtrl();
             m_lstMsg.vBumpDispGeneration();
+            m_lstMsg.Invalidate(FALSE);
             if (nBuffMsgCnt > 0)
             {
                 int nFirst = m_lstMsg.GetTopIndex();
@@ -1218,13 +1219,9 @@ void CMsgFrmtWnd::OnTimer(UINT nIDEvent)
                 if (nLast >= nFirst)
                 {
                     m_lstMsg.RedrawItems(nFirst, nLast);
-                    m_lstMsg.UpdateWindow();
                 }
             }
-            else
-            {
-                m_lstMsg.Invalidate(FALSE);
-            }
+            m_lstMsg.UpdateWindow();
             m_bUpdate = FALSE;
 
             if( IS_MODE_APPEND(m_bExprnFlag_Disp) )
