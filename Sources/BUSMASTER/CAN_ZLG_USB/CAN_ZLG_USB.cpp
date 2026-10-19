@@ -1689,8 +1689,15 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_ListHwInterfaces(INTERFACE_HW_LIST& sSelHwInterfac
     {
         for (INT i = 0; i < nFound; i++)
         {
-            InitData[i].m_bcanFDEnabled = bModelFd ? true : false;
+            // Capability vs selection: support follows the model, but do not force
+            // m_bcanFDEnabled on just because the hardware can do FD. Otherwise
+            // Connect/Disconnect then reopen Channel Configuration re-checks CANFD
+            // after the user left it unchecked.
             InitData[i].m_bSupportCANFD = bModelFd ? true : false;
+            if (!bModelFd)
+            {
+                InitData[i].m_bcanFDEnabled = false;
+            }
             InitData[i].m_bISO = true;
             if (InitData[i].m_unDataBitRate == 0)
             {
