@@ -1193,35 +1193,9 @@ void CMsgFrmtWnd::OnTimer(UINT nIDEvent)
                 //item count in VFSE buffer
                 nBuffMsgCnt = m_omMgsIndexVec.size();
             }
-            /* Append: normal SetItemCountEx. Overwrite: same row count needs
-               generation bump + Invalidate + RedrawItems for live update. */
             m_lstMsg.SetItemCountEx(nBuffMsgCnt);
-            vUpdatePtrInLstCtrl();
-            m_lstMsg.vBumpDispGeneration();
+            //vDoInterpretation();
             m_lstMsg.Invalidate(FALSE);
-            if (nBuffMsgCnt > 0)
-            {
-                int nFirst = m_lstMsg.GetTopIndex();
-                if (nFirst < 0)
-                {
-                    nFirst = 0;
-                }
-                int nPage = m_lstMsg.GetCountPerPage();
-                if (nPage < 1)
-                {
-                    nPage = 1;
-                }
-                int nLast = nFirst + nPage;
-                if (nLast >= nBuffMsgCnt)
-                {
-                    nLast = nBuffMsgCnt - 1;
-                }
-                if (nLast >= nFirst)
-                {
-                    m_lstMsg.RedrawItems(nFirst, nLast);
-                }
-            }
-            m_lstMsg.UpdateWindow();
             m_bUpdate = FALSE;
 
             if( IS_MODE_APPEND(m_bExprnFlag_Disp) )
@@ -1395,11 +1369,15 @@ void CMsgFrmtWnd::vUpdateMsgBufferDetails(INT* pMsgBuffSize)
         m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX] = pMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX];
     }
 
-    if ((m_unDispUpdateTimerId = SetTimer(TIMER_ID_DISPLAY_UPDATE,
-                                          m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX], nullptr)) == 0)
+    UINT unInterval = (UINT)m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX];
+    /* Reject CFX garbage (e.g. 0xCCCCCCCC) and out-of-range intervals. */
+    if (unInterval < defMIN_DISPLAY_UPDATE_TIME ||
+            unInterval > defMAX_DISPLAY_UPDATE_TIME)
     {
-        // Log error message
+        unInterval = defDEF_DISPLAY_UPDATE_TIME;
+        m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX] = (INT)unInterval;
     }
+    m_unDispUpdateTimerId = SetTimer(TIMER_ID_DISPLAY_UPDATE, unInterval, nullptr);
     //RADAR Defect Seq No.52:
     //Need to set the Append and Overwrite Buffer sizes in PSDI_CAN module.
 }
@@ -2071,8 +2049,15 @@ BOOL CMsgFrmtWnd:: bStartReadThread()
     m_pouMsgContainerIntrf->SetClientID(m_dwClientID);
     if (m_pouMsgContainerIntrf->bStartReadThread())
     {
+        UINT unInterval = (UINT)m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX];
+        if (unInterval < defMIN_DISPLAY_UPDATE_TIME ||
+                unInterval > defMAX_DISPLAY_UPDATE_TIME)
+        {
+            unInterval = defDEF_DISPLAY_UPDATE_TIME;
+            m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX] = (INT)unInterval;
+        }
         if ((m_unDispUpdateTimerId = SetTimer(TIMER_ID_DISPLAY_UPDATE,
-                                              m_anMsgBuffSize[defDISPLAY_UPDATE_DATA_INDEX], nullptr)) == 0)
+                                              unInterval, nullptr)) == 0)
         {
             // Log error message
             bResult = FALSE;

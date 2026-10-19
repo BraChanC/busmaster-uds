@@ -218,6 +218,29 @@ enum
 
 IMPLEMENT_DYNAMIC(CMainFrame, CMDIFrameWndEx)
 
+/* CFX save/load used MainFrm m_anMsgBuffSize which stays 0 (or garbage) until
+   Message Window Configure is opened — writing Display_Update_Time as
+   -858993460 (0xCCCCCCCC). Opening that CFX then Connect applies it via
+   SetTimer and Message Window stops live-refreshing. */
+static void vSanitizeMsgBuffSize(INT anBuff[defDISPLAY_CONFIG_PARAM])
+{
+    if (anBuff[defAPPEND_DATA_INDEX] < defMIN_BUFFER_SIZE ||
+            anBuff[defAPPEND_DATA_INDEX] > defMAX_BUFFER_SIZE)
+    {
+        anBuff[defAPPEND_DATA_INDEX] = defDEF_APPEND_BUFFER_SIZE;
+    }
+    if (anBuff[defOVERWRITE_DATE_INDEX] < defMIN_BUFFER_SIZE ||
+            anBuff[defOVERWRITE_DATE_INDEX] > defMAX_BUFFER_SIZE)
+    {
+        anBuff[defOVERWRITE_DATE_INDEX] = defDEF_OVERWRITE_BUFFER_SIZE;
+    }
+    if (anBuff[defDISPLAY_UPDATE_DATA_INDEX] < (INT)defMIN_DISPLAY_UPDATE_TIME ||
+            anBuff[defDISPLAY_UPDATE_DATA_INDEX] > (INT)defMAX_DISPLAY_UPDATE_TIME)
+    {
+        anBuff[defDISPLAY_UPDATE_DATA_INDEX] = defDEF_DISPLAY_UPDATE_TIME;
+    }
+}
+
 BEGIN_MESSAGE_MAP(CMainFrame, CMDIFrameWndEx)
     ON_WM_CREATE()
     ON_COMMAND(IDM_CONFIGURE_DATABASE_OPENACTIVE, OnOpenDatabase)
@@ -568,11 +591,11 @@ CMainFrame::CMainFrame()
     for ( ETYPE_BUS eBus = CAN; eBus != BUS_TOTAL; )
     {
         // Append Buffer Size
-        m_anMsgBuffSize[eBus][defAPPEND_DATA_INDEX] = 0;
+        m_anMsgBuffSize[eBus][defAPPEND_DATA_INDEX] = defDEF_APPEND_BUFFER_SIZE;
         // Overwrite Buffer Size
-        m_anMsgBuffSize[eBus][defOVERWRITE_DATE_INDEX] = 0;
+        m_anMsgBuffSize[eBus][defOVERWRITE_DATE_INDEX] = defDEF_OVERWRITE_BUFFER_SIZE;
         // Display Update Rate
-        m_anMsgBuffSize[eBus][defDISPLAY_UPDATE_DATA_INDEX] = 0;
+        m_anMsgBuffSize[eBus][defDISPLAY_UPDATE_DATA_INDEX] = defDEF_DISPLAY_UPDATE_TIME;
         eBus = static_cast<ETYPE_BUS>( eBus + 1 );
     }
 
@@ -9793,6 +9816,7 @@ HRESULT CMainFrame::IntializeDIL(UINT unDefaultChannelCnt, bool bLoadedFromXml)
                             m_podMsgWndThread->vUpdateClientID(CAN, g_dwClientID);
                             if (m_podMsgWndThread != nullptr)//Msg window
                             {
+                                vSanitizeMsgBuffSize(m_anMsgBuffSize[CAN]);
                                 ::SendMessage(m_podMsgWndThread->hGetHandleMsgWnd(CAN), WM_NOTIFICATION_FROM_OTHER,
                                               eWINID_MSG_WND_GET_BUFFER_DETAILS, (LPARAM)m_anMsgBuffSize[CAN]);
                             }
@@ -10889,6 +10913,7 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
             xmlNodePtr pCANMsgWindow = xmlNewNode(nullptr, BAD_CAST DEF_MSG_WINDOW);
             xmlAddChild(pNodePtr, pCANMsgWindow);
 
+            vSanitizeMsgBuffSize(m_anMsgBuffSize[CAN]);
             INT nAppndBuffrSize = m_anMsgBuffSize[CAN][defAPPEND_DATA_INDEX];
             INT nOverwritBffrSize = m_anMsgBuffSize[CAN][defOVERWRITE_DATE_INDEX];
             INT nDisplayUpdateTime = m_anMsgBuffSize[CAN][defDISPLAY_UPDATE_DATA_INDEX];
@@ -10902,13 +10927,13 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
             CString strDisplayUpdateTime = "";
             strDisplayUpdateTime.Format("%d", nDisplayUpdateTime);
 
-            xmlNodePtr pAppndBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_APPEND_BUFFER_SIZE, BAD_CAST strAppndBffrSize.GetBuffer(strAppndBffrSize.GetLength()));
+            xmlNodePtr pAppndBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_APPEND_BUFFER_SIZE, BAD_CAST (LPCSTR)strAppndBffrSize);
             xmlAddChild(pCANMsgWindow, pAppndBffrPtr);
 
-            xmlNodePtr pOvrwriteBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_OVERWRITE_BUFFER_SIZE, BAD_CAST strOverwritBffrSize.GetBuffer(strOverwritBffrSize.GetLength()));
+            xmlNodePtr pOvrwriteBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_OVERWRITE_BUFFER_SIZE, BAD_CAST (LPCSTR)strOverwritBffrSize);
             xmlAddChild(pCANMsgWindow, pOvrwriteBffrPtr);
 
-            xmlNodePtr pDispBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_DISPLAY_UPDATE_TIME, BAD_CAST strDisplayUpdateTime.GetBuffer(strDisplayUpdateTime.GetLength()));
+            xmlNodePtr pDispBffrPtr = xmlNewChild(pCANMsgWindow, nullptr, BAD_CAST DEF_DISPLAY_UPDATE_TIME, BAD_CAST (LPCSTR)strDisplayUpdateTime);
             xmlAddChild(pCANMsgWindow, pDispBffrPtr);
 
             const char* omcVarChar ;
@@ -10981,6 +11006,7 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
             xmlNodePtr pLINMsgWindow = xmlNewNode(nullptr, BAD_CAST DEF_LIN_MESS_WINDOW);
             xmlAddChild(pNodePtr, pLINMsgWindow);
 
+            vSanitizeMsgBuffSize(m_anMsgBuffSize[LIN]);
             INT nAppndBuffrSize = m_anMsgBuffSize[LIN][defAPPEND_DATA_INDEX];
             INT nOverwritBffrSize = m_anMsgBuffSize[LIN][defOVERWRITE_DATE_INDEX];
             INT nDisplayUpdateTime = m_anMsgBuffSize[LIN][defDISPLAY_UPDATE_DATA_INDEX];
@@ -10994,13 +11020,13 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
             CString strDisplayUpdateTime = "";
             strDisplayUpdateTime.Format("%d", nDisplayUpdateTime);
 
-            xmlNodePtr pAppndBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_APPEND_BUFFER_SIZE, BAD_CAST strAppndBffrSize.GetBuffer(strAppndBffrSize.GetLength()));
+            xmlNodePtr pAppndBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_APPEND_BUFFER_SIZE, BAD_CAST (LPCSTR)strAppndBffrSize);
             xmlAddChild(pLINMsgWindow, pAppndBffrPtr);
 
-            xmlNodePtr pOvrwriteBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_OVERWRITE_BUFFER_SIZE, BAD_CAST strOverwritBffrSize.GetBuffer(strOverwritBffrSize.GetLength()));
+            xmlNodePtr pOvrwriteBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_OVERWRITE_BUFFER_SIZE, BAD_CAST (LPCSTR)strOverwritBffrSize);
             xmlAddChild(pLINMsgWindow, pOvrwriteBffrPtr);
 
-            xmlNodePtr pDispBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_DISPLAY_UPDATE_TIME, BAD_CAST strDisplayUpdateTime.GetBuffer(strDisplayUpdateTime.GetLength()));
+            xmlNodePtr pDispBffrPtr = xmlNewChild(pLINMsgWindow, nullptr, BAD_CAST DEF_DISPLAY_UPDATE_TIME, BAD_CAST (LPCSTR)strDisplayUpdateTime);
             xmlAddChild(pLINMsgWindow, pDispBffrPtr);
 
             const char* omcVarChar ;
@@ -11229,15 +11255,39 @@ void CMainFrame::vGetCurrentSessionData(eSECTION_ID eSecId, xmlNodePtr pNodePtr)
                     //xmlTextWriterSetIndent(pNodeDBFilePtr, 1);
                 }
 
-                int nStMin = 0, nBlockSize = 0;
-                DIL_UDS_GetIsoTpParams(&nStMin, &nBlockSize);
+                SUDS_SETTINGS_CFX sUds = {0};
+                DIL_UDS_GetSettings(&sUds);
                 xmlNodePtr pUdsPtr = xmlNewNode(nullptr, BAD_CAST DEF_UDS_SETTINGS);
                 xmlAddChild(pNodePtr, pUdsPtr);
                 CString omStrVal;
-                omStrVal.Format("%d", nStMin);
-                xmlNewChild(pUdsPtr, nullptr, BAD_CAST DEF_UDS_STMIN, BAD_CAST(LPCSTR)omStrVal);
-                omStrVal.Format("%d", nBlockSize);
-                xmlNewChild(pUdsPtr, nullptr, BAD_CAST DEF_UDS_BS, BAD_CAST(LPCSTR)omStrVal);
+                const struct
+                {
+                    const char* name;
+                    int value;
+                } aUdsFields[] =
+                {
+                    { DEF_UDS_INTERFACE, sUds.nInterface },
+                    { DEF_UDS_DIAGNOSTICS, sUds.nDiagnostics },
+                    { DEF_UDS_MSG_ID, (int)sUds.unMsgId },
+                    { DEF_UDS_RESP_ID, sUds.nRespId },
+                    { DEF_UDS_SOURCE_ADDR, (int)sUds.unSourceAddr },
+                    { DEF_UDS_TARGET_ADDR, (int)sUds.unTargetAddr },
+                    { DEF_UDS_RESP_MSG_ID, sUds.nRespMsgId },
+                    { DEF_UDS_STMIN, sUds.nStMin },
+                    { DEF_UDS_BS, sUds.nBlockSize },
+                    { DEF_UDS_P2, sUds.nP2 },
+                    { DEF_UDS_P2_EXTENDED, sUds.nP2Extended },
+                    { DEF_UDS_S3_CLIENT, sUds.nS3Client },
+                    { DEF_UDS_S3_SERVER, sUds.nS3Server },
+                    { DEF_UDS_FC_LENGTH, sUds.nSizeFC },
+                    { DEF_UDS_ALWAYS_8BYTE, sUds.nMsgSizeAlways8 },
+                    { DEF_UDS_FC_NO_RESP, sUds.nFcNoRespReq },
+                };
+                for (int i = 0; i < (int)(sizeof(aUdsFields) / sizeof(aUdsFields[0])); i++)
+                {
+                    omStrVal.Format("%d", aUdsFields[i].value);
+                    xmlNewChild(pUdsPtr, nullptr, BAD_CAST aUdsFields[i].name, BAD_CAST(LPCSTR)omStrVal);
+                }
             }
         }
         break;
@@ -12422,15 +12472,66 @@ int CMainFrame::nLoadXMLConfiguration()
                             sizeof(SCONTROLLER_DETAILS) * defNO_OF_CHANNELS);
                 }
 
-                int nUdsParams[2] = { 0, 0 };
-                const char* acUdsPaths[2] =
+                /* Start from live settings so old CFX (only STmin/BS) does not
+                   zero MsgID/RespID and break diagnostics. */
+                SUDS_SETTINGS_CFX sUds = {0};
+                DIL_UDS_GetSettings(&sUds);
+                if (sUds.nP2 <= 0)
                 {
-                    "//BUSMASTER_CONFIGURATION/Module_Configuration/" DEF_UDS_SETTINGS "/" DEF_UDS_STMIN,
-                    "//BUSMASTER_CONFIGURATION/Module_Configuration/" DEF_UDS_SETTINGS "/" DEF_UDS_BS
+                    sUds.nP2 = 250;
+                }
+                if (sUds.nP2Extended <= 0)
+                {
+                    sUds.nP2Extended = 2000;
+                }
+                if (sUds.nS3Client <= 0)
+                {
+                    sUds.nS3Client = 2000;
+                }
+                if (sUds.nS3Server <= 0)
+                {
+                    sUds.nS3Server = 5000;
+                }
+                if (sUds.nSizeFC <= 0)
+                {
+                    sUds.nSizeFC = 8;
+                }
+                if (sUds.nRespId == 0)
+                {
+                    sUds.nRespId = 0x7E8;
+                }
+                int nMsgId = (int)sUds.unMsgId;
+                int nSrc = (int)sUds.unSourceAddr;
+                int nTgt = (int)sUds.unTargetAddr;
+                const struct
+                {
+                    const char* pathSuffix;
+                    int* pValue;
+                } aUdsLoad[] =
+                {
+                    { DEF_UDS_INTERFACE, &sUds.nInterface },
+                    { DEF_UDS_DIAGNOSTICS, &sUds.nDiagnostics },
+                    { DEF_UDS_MSG_ID, &nMsgId },
+                    { DEF_UDS_RESP_ID, &sUds.nRespId },
+                    { DEF_UDS_SOURCE_ADDR, &nSrc },
+                    { DEF_UDS_TARGET_ADDR, &nTgt },
+                    { DEF_UDS_RESP_MSG_ID, &sUds.nRespMsgId },
+                    { DEF_UDS_STMIN, &sUds.nStMin },
+                    { DEF_UDS_BS, &sUds.nBlockSize },
+                    { DEF_UDS_P2, &sUds.nP2 },
+                    { DEF_UDS_P2_EXTENDED, &sUds.nP2Extended },
+                    { DEF_UDS_S3_CLIENT, &sUds.nS3Client },
+                    { DEF_UDS_S3_SERVER, &sUds.nS3Server },
+                    { DEF_UDS_FC_LENGTH, &sUds.nSizeFC },
+                    { DEF_UDS_ALWAYS_8BYTE, &sUds.nMsgSizeAlways8 },
+                    { DEF_UDS_FC_NO_RESP, &sUds.nFcNoRespReq },
                 };
-                for (int nParam = 0; nParam < 2 && m_xmlConfigFiledoc != nullptr; nParam++)
+                for (int nParam = 0; nParam < (int)(sizeof(aUdsLoad) / sizeof(aUdsLoad[0])) && m_xmlConfigFiledoc != nullptr; nParam++)
                 {
-                    pPathObject = xmlUtils::pGetNodes(m_xmlConfigFiledoc, (xmlChar*)acUdsPaths[nParam]);
+                    CString omPath;
+                    omPath.Format("//BUSMASTER_CONFIGURATION/Module_Configuration/%s/%s",
+                                  DEF_UDS_SETTINGS, aUdsLoad[nParam].pathSuffix);
+                    pPathObject = xmlUtils::pGetNodes(m_xmlConfigFiledoc, (xmlChar*)(LPCSTR)omPath);
                     if (nullptr == pPathObject)
                     {
                         continue;
@@ -12441,13 +12542,16 @@ int CMainFrame::nLoadXMLConfiguration()
                         xmlChar* ptext = xmlNodeListGetString(m_xmlConfigFiledoc, pNodeSet->nodeTab[0]->xmlChildrenNode, 1);
                         if (nullptr != ptext)
                         {
-                            nUdsParams[nParam] = atoi((char*)ptext);
+                            *aUdsLoad[nParam].pValue = atoi((char*)ptext);
                             xmlFree(ptext);
                         }
                     }
                     xmlXPathFreeObject(pPathObject);
                 }
-                DIL_UDS_SetIsoTpParams(nUdsParams[0], nUdsParams[1]);
+                sUds.unMsgId = (unsigned int)nMsgId;
+                sUds.unSourceAddr = (unsigned int)nSrc;
+                sUds.unTargetAddr = (unsigned int)nTgt;
+                DIL_UDS_SetSettings(&sUds);
             }
             break;
             case FILTER_SECTION_ID:
@@ -12648,6 +12752,15 @@ int CMainFrame::nLoadXMLConfiguration()
                     xmlXPathFreeObject (pPathObject);
                 }
 
+                vSanitizeMsgBuffSize(m_anMsgBuffSize[CAN]);
+                if (m_podMsgWndThread != nullptr)
+                {
+                    ::SendMessage(m_podMsgWndThread->hGetHandleMsgWnd(CAN),
+                                  WM_NOTIFICATION_FROM_OTHER,
+                                  eWINID_MSG_WND_GET_BUFFER_DETAILS,
+                                  (LPARAM)m_anMsgBuffSize[CAN]);
+                }
+
                 //Msg Filter
                 bool bResult = false;
                 SFILTERAPPLIED_CAN sMsgWndFilter;
@@ -12845,6 +12958,15 @@ int CMainFrame::nLoadXMLConfiguration()
                         m_anMsgBuffSize[LIN][defDISPLAY_UPDATE_DATA_INDEX] = defDEF_DISPLAY_UPDATE_TIME;
                     }
                     xmlXPathFreeObject (pPathObject);
+                }
+
+                vSanitizeMsgBuffSize(m_anMsgBuffSize[LIN]);
+                if (m_podMsgWndThread != nullptr)
+                {
+                    ::SendMessage(m_podMsgWndThread->hGetHandleMsgWnd(LIN),
+                                  WM_NOTIFICATION_FROM_OTHER,
+                                  eWINID_MSG_WND_GET_BUFFER_DETAILS,
+                                  (LPARAM)m_anMsgBuffSize[LIN]);
                 }
 
                 //Msg Filter
@@ -14280,8 +14402,17 @@ void CMainFrame::vSetDefaultConfiguration(eSECTION_ID eSecId)
 
             g_pouDIL_CAN_Interface->DILC_SetConfigData(m_asControllerDetails,
                     sizeof(SCONTROLLER_DETAILS) * defNO_OF_CHANNELS);
-            //Set default settings
-            DIL_UDS_SetIsoTpParams(0, 0);
+            //Set default UDS Settings
+            {
+                SUDS_SETTINGS_CFX sUds = {0};
+                sUds.nRespId = 0x7E8;
+                sUds.nP2 = 250;
+                sUds.nP2Extended = 2000;
+                sUds.nS3Client = 2000;
+                sUds.nS3Server = 5000;
+                sUds.nSizeFC = 8;
+                DIL_UDS_SetSettings(&sUds);
+            }
         }
         break;
         case GRAPH_SECTION_ID:

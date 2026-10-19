@@ -155,6 +155,15 @@ static HRESULT UdsEnsureMainWnd(HWND hParent, int TotalChannels)
         {
             NegRespManager = new CUDS_NegRespMng(omManagerPtr);
         }
+        /* CFX may have loaded before the window existed — push IDs into UI. */
+        if (omManagerPtr != NULL && omManagerPtr->MsgID != 0)
+        {
+            omMainWnd->fInterface = omManagerPtr->fInterface;
+            omMainWnd->SourceAddress = omManagerPtr->SourceAddress;
+            omMainWnd->TargetAddress = omManagerPtr->TargetAddress;
+            omMainWnd->CanID = omManagerPtr->MsgID;
+            omManagerPtr->UpdateFields();
+        }
     }
     else
     {
@@ -1197,28 +1206,139 @@ USAGEMODE HRESULT DIL_UDS_ShowSettingWnd(HWND hParent)
     return 0;
 }
 
+USAGEMODE void DIL_UDS_GetSettings(SUDS_SETTINGS_CFX* pSettings)
+{
+    if (pSettings == NULL)
+    {
+        return;
+    }
+    memset(pSettings, 0, sizeof(SUDS_SETTINGS_CFX));
+    if (omManagerPtr != NULL)
+    {
+        pSettings->nInterface = (int)omManagerPtr->fInterface;
+        pSettings->nDiagnostics = (int)omManagerPtr->fDiagnostics;
+        pSettings->unMsgId = omManagerPtr->MsgID;
+        pSettings->unSourceAddr = omManagerPtr->SourceAddress;
+        pSettings->unTargetAddr = omManagerPtr->TargetAddress;
+    }
+    pSettings->nRespId = respID;
+    pSettings->nRespMsgId = RespMsgID;
+    pSettings->nStMin = SSTMin & 0xFF;
+    pSettings->nBlockSize = BSize & 0xFF;
+    pSettings->nP2 = P2_Time;
+    pSettings->nP2Extended = P2_Time_Extended;
+    pSettings->nS3Client = S3_Client;
+    pSettings->nS3Server = S3_Server;
+    pSettings->nSizeFC = SizeFC;
+    pSettings->nMsgSizeAlways8 = fMsgSize ? 1 : 0;
+    pSettings->nFcNoRespReq = FCRespReq ? 1 : 0;
+}
+
+USAGEMODE void DIL_UDS_SetSettings(const SUDS_SETTINGS_CFX* pSettings)
+{
+    if (pSettings == NULL)
+    {
+        return;
+    }
+    AFX_MANAGE_STATE(AfxGetStaticModuleState());
+    SSTMin = pSettings->nStMin & 0xFF;
+    BSize = pSettings->nBlockSize & 0xFF;
+    P2_Time = (pSettings->nP2 > 0) ? pSettings->nP2 : 250;
+    P2_Time_Extended = (pSettings->nP2Extended > 0) ? pSettings->nP2Extended : 2000;
+    S3_Client = (pSettings->nS3Client > 0) ? pSettings->nS3Client : 2000;
+    S3_Server = (pSettings->nS3Server > 0) ? pSettings->nS3Server : 5000;
+    if (pSettings->nSizeFC == 8)
+    {
+        SizeFC = 8;
+    }
+    else if (pSettings->nSizeFC >= 3)
+    {
+        SizeFC = pSettings->nSizeFC;
+    }
+    else
+    {
+        SizeFC = 8;
+    }
+    fMsgSize = (pSettings->nMsgSizeAlways8 != 0);
+    FCRespReq = (pSettings->nFcNoRespReq != 0);
+    if (pSettings->nRespId != 0)
+    {
+        respID = pSettings->nRespId;
+    }
+    RespMsgID = pSettings->nRespMsgId;
+
+    UDS_INTERFACE eIface = (UDS_INTERFACE)pSettings->nInterface;
+    switch (eIface)
+    {
+        case INTERFACE_EXTENDED_11:
+            numberOfTaken = 10;
+            initialByte = 1;
+            aux_Finterface = 1;
+            break;
+        default:
+            numberOfTaken = 12;
+            initialByte = 0;
+            aux_Finterface = 0;
+            break;
+    }
+
+    if (omManagerPtr != NULL)
+    {
+        omManagerPtr->fInterface = eIface;
+        omManagerPtr->fDiagnostics = (DIAGNOSTIC_STANDARD)pSettings->nDiagnostics;
+        /* Do not clear a working MsgID with a missing/zero CFX field. */
+        if (pSettings->unMsgId != 0)
+        {
+            omManagerPtr->MsgID = pSettings->unMsgId;
+        }
+        if (pSettings->unSourceAddr != 0 || pSettings->unMsgId != 0)
+        {
+            omManagerPtr->SourceAddress = (pSettings->unSourceAddr != 0)
+                                         ? pSettings->unSourceAddr
+                                         : pSettings->unMsgId;
+        }
+        if (pSettings->unTargetAddr != 0 || pSettings->nRespId != 0)
+        {
+            omManagerPtr->TargetAddress = (pSettings->unTargetAddr != 0)
+                                         ? pSettings->unTargetAddr
+                                         : (UINT)pSettings->nRespId;
+        }
+        if (omMainWnd != NULL && ::IsWindow(omMainWnd->GetSafeHwnd()))
+        {
+            omMainWnd->fInterface = omManagerPtr->fInterface;
+            omMainWnd->SourceAddress = omManagerPtr->SourceAddress;
+            omMainWnd->TargetAddress = omManagerPtr->TargetAddress;
+            omMainWnd->CanID = omManagerPtr->MsgID;
+        }
+        omManagerPtr->UpdateFields();
+    }
+    if (omSettingsWnd != NULL && ::IsWindow(omSettingsWnd->GetSafeHwnd()))
+    {
+        omSettingsWnd->SyncFromProtocol();
+    }
+}
+
 USAGEMODE void DIL_UDS_GetIsoTpParams(int* stMin, int* blockSize)
 {
+    SUDS_SETTINGS_CFX s;
+    DIL_UDS_GetSettings(&s);
     if (stMin != NULL)
     {
-        *stMin = SSTMin & 0xFF;
+        *stMin = s.nStMin;
     }
     if (blockSize != NULL)
     {
-        *blockSize = BSize & 0xFF;
+        *blockSize = s.nBlockSize;
     }
 }
 
 USAGEMODE void DIL_UDS_SetIsoTpParams(int stMin, int blockSize)
 {
-    AFX_MANAGE_STATE(AfxGetStaticModuleState());
-    SSTMin = stMin & 0xFF;
-    BSize = blockSize & 0xFF;
-    if (omSettingsWnd != NULL && ::IsWindow(omSettingsWnd->GetSafeHwnd()))
-    {
-        omSettingsWnd->m_STMin.vSetValue(SSTMin);
-        omSettingsWnd->m_BSize.vSetValue(BSize);
-    }
+    SUDS_SETTINGS_CFX s;
+    DIL_UDS_GetSettings(&s);
+    s.nStMin = stMin;
+    s.nBlockSize = blockSize;
+    DIL_UDS_SetSettings(&s);
 }
 
 //________________________________________________________________________________________________________________________________________________________________

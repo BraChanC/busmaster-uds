@@ -339,28 +339,10 @@ void CUDSSettingsWnd::SyncFromProtocol()
     {
         return;
     }
+    /* One-way: protocol/globals -> Settings UI only. Never write MainWnd
+       members back into protocol (that wiped MsgID/SA/TA after CFX load). */
     UINT unReq = UdsProtocolPtr->MsgID;
     UINT unResp = (UINT)respID;
-    if (omMainWnd != NULL && ::IsWindow(omMainWnd->GetSafeHwnd()))
-    {
-        const UINT unMain = (UINT)omMainWnd->m_omCanID.lGetValue();
-        if (unMain != 0)
-        {
-            unReq = unMain;
-        }
-        else if (omMainWnd->CanID != 0)
-        {
-            unReq = omMainWnd->CanID;
-        }
-        UdsProtocolPtr->MsgID = unReq;
-        UdsProtocolPtr->SourceAddress = omMainWnd->SourceAddress;
-        UdsProtocolPtr->TargetAddress = omMainWnd->TargetAddress;
-        UdsProtocolPtr->fInterface = omMainWnd->fInterface;
-        if (respID != 0)
-        {
-            unResp = (UINT)respID;
-        }
-    }
     if (unResp == 0 && unReq != 0)
     {
         if (unReq == 0x7DF)
@@ -376,19 +358,35 @@ void CUDSSettingsWnd::SyncFromProtocol()
             unResp = unReq;
         }
     }
+
+    int nIface = (int)UdsProtocolPtr->fInterface;
+    if (nIface < 0 || nIface >= SIZE_INTERFACE_COMB)
+    {
+        nIface = 0;
+    }
+    m_nInterfaceIndex = nIface;
+    m_omInterface.SetCurSel(nIface);
+    /* Layout only — OnCbnSelchangeComboInterface resets Req/Resp to 7E0/7E8. */
+    OnCbnSelchangeComboInterface();
+
+    int nDiag = (int)UdsProtocolPtr->fDiagnostics;
+    if (nDiag < 0 || nDiag >= NUM_STAND_APPLIED)
+    {
+        nDiag = 0;
+    }
+    m_nDiagnosticsIndex = nDiag;
+    m_omStdDiag.SetCurSel(nDiag);
+    OnCbnSelchangeStandardDiag();
+
     switch (UdsProtocolPtr->fInterface)
     {
         case INTERFACE_NORMAL_11:
-            m_omInterface.SetCurSel(0);
-            OnCbnSelchangeComboInterface();
             m_omReqCanID.vSetValue(unReq);
             m_omRespCanID.vSetValue(unResp);
             break;
         case INTERFACE_EXTENDED_11:
-            m_omInterface.SetCurSel(1);
-            OnCbnSelchangeComboInterface();
             m_omReqBaseAddress.vSetValue(unReq);
-            m_omRespBaseAddress.vSetValue(unResp);
+            m_omRespBaseAddress.vSetValue((RespMsgID != 0) ? (UINT)RespMsgID : unResp);
             break;
         default:
             m_omReqCanID.vSetValue(unReq);
@@ -399,6 +397,16 @@ void CUDSSettingsWnd::SyncFromProtocol()
     {
         m_omReqBroadcAddress.vSetValue(0x7DF);
     }
+
+    m_STMin.vSetValue(SSTMin);
+    m_BSize.vSetValue(BSize);
+    m_S3Client.vSetValue(S3_Client);
+    m_S3_Server.vSetValue(S3_Server);
+    P2TimeOut.vSetValue(P2_Time);
+    P2extended.vSetValue(P2_Time_Extended);
+    m_omFCLength.SetCurSel((SizeFC == 8) ? 1 : 0);
+    m_omCheckMsgDLC.SetCheck(fMsgSize ? BST_CHECKED : BST_UNCHECKED);
+    m_omTPNoRespReq.SetCheck(FCRespReq ? BST_CHECKED : BST_UNCHECKED);
 }
 
 /**********************************************************************************************************
@@ -482,7 +490,8 @@ void CUDSSettingsWnd::vInitializeUDSSettingsfFields()
     OnCbnSelchangeStandardDiag();
     Prev_InterfaceIndex = 0;
     m_omReqBroadcAddress.vSetValue(0x7DF);
-    OnBnApplyPressed();
+    /* Do not Apply here — that would overwrite CFX-loaded protocol state with
+       dialog defaults before SyncFromProtocol runs. */
 }
 
 

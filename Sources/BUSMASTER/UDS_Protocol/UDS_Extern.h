@@ -42,7 +42,30 @@ extern "C" {  // only need to export C interface if used by C++ source code
     USAGEMODE HRESULT DIL_UDS_ShowFlashWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowServerWnd(HWND hParent);
     USAGEMODE HRESULT DIL_UDS_ShowTransferWnd(HWND hParent);
-    /* ISO-TP flow-control parameters stored in the configuration file. */
+    /* Full UDS Settings dialog state persisted in .cfx (UDS_Settings). */
+    typedef struct tagSUDS_SETTINGS_CFX
+    {
+        int nInterface;
+        int nDiagnostics;
+        unsigned int unMsgId;
+        int nRespId;
+        unsigned int unSourceAddr;
+        unsigned int unTargetAddr;
+        int nRespMsgId;
+        int nStMin;
+        int nBlockSize;
+        int nP2;
+        int nP2Extended;
+        int nS3Client;
+        int nS3Server;
+        int nSizeFC;
+        int nMsgSizeAlways8;
+        int nFcNoRespReq;
+    } SUDS_SETTINGS_CFX;
+
+    USAGEMODE void DIL_UDS_GetSettings(SUDS_SETTINGS_CFX* pSettings);
+    USAGEMODE void DIL_UDS_SetSettings(const SUDS_SETTINGS_CFX* pSettings);
+    /* ISO-TP flow-control parameters (subset of Get/SetSettings). */
     USAGEMODE void DIL_UDS_GetIsoTpParams(int* stMin, int* blockSize);
     USAGEMODE void DIL_UDS_SetIsoTpParams(int stMin, int blockSize);
     USAGEMODE LONG DIL_UDS_ResponseSeq();
