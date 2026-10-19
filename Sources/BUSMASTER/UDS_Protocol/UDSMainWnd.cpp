@@ -537,6 +537,29 @@ static int UdsTxDlc()
     return g_udsFdDlc;
 }
 
+/* Smallest CAN FD length that can hold nBytes (0..8,12,16,20,24,32,48,64). */
+static int UdsFdCeilLen(int nBytes)
+{
+    static const int s_anLen[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
+    int nMax = UdsTxDlc();
+    if (nBytes < 0)
+    {
+        nBytes = 0;
+    }
+    if (nBytes > nMax)
+    {
+        nBytes = nMax;
+    }
+    for (int i = 0; i < (int)(sizeof(s_anLen) / sizeof(s_anLen[0])); i++)
+    {
+        if (s_anLen[i] >= nBytes && s_anLen[i] <= nMax)
+        {
+            return s_anLen[i];
+        }
+    }
+    return nMax;
+}
+
 /* Hands the bytes after the First Frame to the CF worker. The FF message is
    the template (ID, channel, extended-address byte). */
 static void ArmConsecutiveFrames(const CString& omHexRest, const STCAN_MSG& sFf, HWND hNotify)
@@ -818,14 +841,26 @@ void CUDSMainWnd::PrepareFlowControl()
     {
         minLen = 3;
     }
-    int dlc = g_udsCanFd ? UdsTxDlc() : SizeFC;
-    if (!g_udsCanFd && (dlc < minLen || dlc > 8))
-    {
-        dlc = (dlc > 8 || dlc <= 0) ? 8 : minLen;
-    }
+    int dlc;
     if (g_udsCanFd)
     {
-        memset(psTxCanMsgUds->m_psTxMsg->m_ucData, 0, 64);
+        dlc = fMsgSize ? 8 : UdsFdCeilLen(minLen);
+        if (dlc > 8)
+        {
+            dlc = 8;
+        }
+        if (dlc < minLen)
+        {
+            dlc = minLen;
+        }
+    }
+    else
+    {
+        dlc = SizeFC;
+        if (dlc < minLen || dlc > 8)
+        {
+            dlc = (dlc > 8 || dlc <= 0) ? 8 : minLen;
+        }
     }
     unsigned char bs = (unsigned char)(BSize & 0xFF);
     unsigned char st = (unsigned char)(SSTMin & 0xFF);
@@ -889,30 +924,72 @@ void CUDSMainWnd::PrepareDiagnosticMessage(CString omByteStr,mPSTXSELMSGDATA psT
 
     if (g_udsCanFd)
     {
-        int dlc = UdsTxDlc();
+        int nMax = UdsTxDlc();
         int aux = aux_Finterface;
+        if (aux < 0)
+        {
+            aux = 0;
+        }
         BOOL ext29 = (fInterface == INTERFACE_NORMAL_ISO_29 || fInterface == INTERFACE_NORMAL_J1939_29);
         psTxCanMsgUds->m_psTxMsg->m_ucEXTENDED = ext29 ? TRUE : FALSE;
         memset(abByteArr, 0, 64);
-        int sfMax = (dlc > 8) ? (dlc - 2 - aux) : (7 - aux);
-        if ((int)Result <= sfMax)
+        /* ISO 15765-2: smallest CAN_DL. Classic SF when fits in 8; escape only
+           when CAN_DL > 8 is required. Forcing 64 breaks several FD stacks. */
+        int nClassicDataMax = 7 - aux;
+        if (nClassicDataMax < 0)
         {
+            nClassicDataMax = 0;
+        }
+        int nEscapeDataMax = (nMax > 8) ? (nMax - 2 - aux) : -1;
+        if ((int)Result <= nClassicDataMax)
+        {
+            int nNeed = aux + 1 + (int)Result;
+            int dlc = fMsgSize ? 8 : UdsFdCeilLen(nNeed);
+            if (dlc > 8)
+            {
+                dlc = 8;
+            }
+            if (dlc < nNeed)
+            {
+                dlc = nNeed;
+            }
             int dataAt;
             if (aux > 0)
             {
                 abByteArr[0] = (BYTE)TargetAddress;
             }
+            abByteArr[aux] = (BYTE)Result;
+            dataAt = aux + 1;
+            for (UINT n = 0; n < Result; n++)
+            {
+                CString one = omByteStr.Mid(n * 2, 2);
+                abByteArr[dataAt + (int)n] = (BYTE)_tcstol(one, NULL, 16);
+            }
+            psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
+            psTxCanMsgUds->m_psTxMsg->m_bCANFD = true;
+            SendSimpleDiagnosticMessage();
+            return;
+        }
+        if ((int)Result <= nEscapeDataMax)
+        {
+            int nNeed = aux + 2 + (int)Result;
+            int dlc = UdsFdCeilLen(nNeed);
             if (dlc <= 8)
             {
-                abByteArr[aux] = (BYTE)Result;
-                dataAt = aux + 1;
+                dlc = 12;
             }
-            else
+            if (dlc > nMax)
             {
-                abByteArr[aux] = 0x00;
-                abByteArr[aux + 1] = (BYTE)Result;
-                dataAt = aux + 2;
+                dlc = nMax;
             }
+            int dataAt;
+            if (aux > 0)
+            {
+                abByteArr[0] = (BYTE)TargetAddress;
+            }
+            abByteArr[aux] = 0x00;
+            abByteArr[aux + 1] = (BYTE)Result;
+            dataAt = aux + 2;
             for (UINT n = 0; n < Result; n++)
             {
                 CString one = omByteStr.Mid(n * 2, 2);
@@ -1184,25 +1261,26 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
         {
             psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte-1]= TargetAddress;
         }
-        if (g_udsCanFd && UdsTxDlc() > 8)
-        {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte] = 0x00;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 1] = 0x02;
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 2] = 0x3E;
-            psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)UdsTxDlc();
-            if (FCRespReq)
-            {
-                psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte + 3] = 0x80;
-            }
-        }
-        else
-        {
-        psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte]= 0x02;          //The tester Present will always have 2 bytes 0x3E y 0x00
+        /* Tester Present is always 2 data bytes — classic SF even on CAN FD. */
+        psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte]= 0x02;
         psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+1]= 0x3E;
-
-        if(fMsgSize)                    // how many bytes has the flow Control?
+        if(fMsgSize)
         {
             psTxCanMsgUds->m_psTxMsg->m_ucDataLen = 8;
+        }
+        else if (g_udsCanFd)
+        {
+            int nNeed = aux_Finterface + 3;
+            int dlc = UdsFdCeilLen(nNeed);
+            if (dlc > 8)
+            {
+                dlc = 8;
+            }
+            if (dlc < nNeed)
+            {
+                dlc = nNeed;
+            }
+            psTxCanMsgUds->m_psTxMsg->m_ucDataLen = (unsigned char)dlc;
         }
         else
         {
@@ -1210,8 +1288,7 @@ void  CUDSMainWnd::OnTimer(UINT_PTR nIDEvent)
         }
         if(FCRespReq)
         {
-            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2]= 0x80;    // if NoResponse Required is activated
-        }
+            psTxCanMsgUds->m_psTxMsg->m_ucData[initialByte+2]= 0x80;
         }
         SendSimpleDiagnosticMessage();
     }

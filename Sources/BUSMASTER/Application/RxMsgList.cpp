@@ -47,6 +47,7 @@ Modifications   :   -
 CRxMsgList::CRxMsgList()
 {
     m_bConnected = FALSE;
+    m_nDispGeneration = 0;
     m_nSortedColumn = 1;
     m_pbSortableColumn = nullptr;
     m_pbAscendingOrder = nullptr;
@@ -119,19 +120,32 @@ Authors         :   Ravi D
 Date Created    :   19/09/2006
 Modifications   :   Anish Kumar,02.11.09, Modified to make it Msg type independent
 ************************************************************************************/
+void CRxMsgList::vBumpDispGeneration()
+{
+    ++m_nDispGeneration;
+}
+
 void CRxMsgList::OnLvnGetdispinfo(NMHDR* pNMHDR, LRESULT* pResult)
 {
     NMLVDISPINFO* pDispInfo = reinterpret_cast<NMLVDISPINFO*>(pNMHDR);
     LV_ITEM* pItem= &(pDispInfo->item);
     static SWMUPDATEPTRPARA sParam;
+    static UINT s_nCachedGen = 0;
 
-    if ( (0 == pItem->iSubItem) && (pItem->mask & LVIF_TEXT))
+    const bool bGenOrRowChanged =
+        (s_nCachedGen != m_nDispGeneration) ||
+        (sParam.m_nListIndex != pItem->iItem) ||
+        !sParam.m_bResult;
+    const bool bClassicCol0Text =
+        (0 == pItem->iSubItem) && ((pItem->mask & LVIF_TEXT) != 0);
+
+    if ((pItem->mask & (LVIF_TEXT | LVIF_IMAGE)) &&
+        (bClassicCol0Text || bGenOrRowChanged))
     {
         sParam.m_nListIndex  = pItem->iItem;
         sParam.m_eInPretMode = MODE_NONE;
         sParam.m_bResult     = FALSE;
-        //For any row the update should happen only once when this fn is called
-        //for first sub item
+        s_nCachedGen         = m_nDispGeneration;
         ::SendMessage( m_hParent, WM_PARENT_UPDATE_MSGPTR, (WPARAM)&sParam, 0);
     }
     if (sParam.m_bResult != FALSE)

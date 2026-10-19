@@ -735,9 +735,12 @@ BOOL SFILTER_CAN::bDoesFrameOccur(const void* psCurrFrame) const
                     if ((TYPE_ID_CAN_ALL == m_byIDType) ||
                             (m_byIDType == sCurrFrame.m_byIDType))
                     {
-                        //Check for RTR
+                        /* NONRTR = data frame (vs RTR). CAN FD data frames are
+                           also non-RTR; UI has no FD item, so NONRTR matches FD. */
                         if ((TYPE_MSG_CAN_ALL == m_byMsgType) ||
-                                (m_byMsgType == sCurrFrame.m_byMsgType))
+                                (m_byMsgType == sCurrFrame.m_byMsgType) ||
+                                (m_byMsgType == TYPE_MSG_CAN_NON_RTR &&
+                                 sCurrFrame.m_byMsgType == TYPE_MSG_CAN_FD))
                         {
                             bResult = TRUE;
                         }
@@ -766,9 +769,10 @@ BOOL SFILTER_CAN::bDoesFrameOccur(const void* psCurrFrame) const
                     if ((TYPE_ID_CAN_ALL == m_byIDType) ||
                             (m_byIDType == sCurrFrame.m_byIDType))
                     {
-                        //Check for RTR
                         if ((TYPE_MSG_CAN_ALL == m_byMsgType) ||
-                                (m_byMsgType == sCurrFrame.m_byMsgType))
+                                (m_byMsgType == sCurrFrame.m_byMsgType) ||
+                                (m_byMsgType == TYPE_MSG_CAN_NON_RTR &&
+                                 sCurrFrame.m_byMsgType == TYPE_MSG_CAN_FD))
                         {
                             bResult = TRUE;
                         }

@@ -101,6 +101,9 @@ private:
         void ClearArrowDirection();
     };
     bool m_bConnected;
+    // Bumped by MsgWnd before each list paint so GetDispInfo re-formats
+    // even when row index is unchanged (Overwrite) or col0 is skipped.
+    UINT m_nDispGeneration;
 
 public:
     // Member data
@@ -112,6 +115,7 @@ public:
     void vSetMsgColor(COLORREF color);
     void vShowHideBlankcolumn(BOOL bInterpretON);
     void vSetSortableMsgColumns(SMSGWNDHDRCOL& sHdrColStruct, ETYPE_BUS eBusType);
+    void vBumpDispGeneration();
     DECLARE_MESSAGE_MAP()
 public:
     afx_msg void OnLvnGetdispinfo(NMHDR* pNMHDR, LRESULT* pResult);

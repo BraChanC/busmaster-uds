@@ -800,7 +800,9 @@ static void DispatchFd(int nChannelIndex, const zlg_canfd_frame& frame, UINT64 t
     can_data.m_uDataInfo.m_sCANMsg.m_ucRTR = (frame.can_id & CAN_RTR_FLAG) ? 1 : 0;
     can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLen;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nChannelIndex + 1);
-    can_data.m_uDataInfo.m_sCANMsg.m_bCANFD = true;
+    /* ReceiveFD can also deliver classic frames on an FD channel. */
+    can_data.m_uDataInfo.m_sCANMsg.m_bCANFD =
+        ((frame.flags & (CANFD_BRS | CANFD_ESI)) != 0) || (ucLen > 8);
     memcpy(can_data.m_uDataInfo.m_sCANMsg.m_ucData, frame.data, ucLen);
     can_data.m_lTickCount.QuadPart = (LONGLONG)(ts / 100ULL);
     vWriteIntoClientsBuffer(can_data);
@@ -1971,18 +1973,35 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxM
     }
 
     UINT unSent = 0;
+    BYTE ucLenOut = sCanTxMsg.m_ucDataLen;
     if (sg_abCanFd[nIndex] && sg_TransmitFD != nullptr)
     {
+        static const BYTE s_aucFdLen[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
+        BYTE ucLen = sCanTxMsg.m_ucDataLen > 64 ? 64 : sCanTxMsg.m_ucDataLen;
+        for (int i = 0; i < 16; i++)
+        {
+            if (s_aucFdLen[i] >= ucLen)
+            {
+                ucLen = s_aucFdLen[i];
+                break;
+            }
+        }
         ZCAN_TransmitFD_Data tx;
         memset(&tx, 0, sizeof(tx));
         tx.transmit_type = 0;
         tx.frame.can_id = MakeCanId(sCanTxMsg.m_unMsgID, sCanTxMsg.m_ucEXTENDED, sCanTxMsg.m_ucRTR);
-        tx.frame.len = sCanTxMsg.m_ucDataLen > 64 ? 64 : sCanTxMsg.m_ucDataLen;
+        tx.frame.len = ucLen;
+        ucLenOut = ucLen;
         if (sCanTxMsg.m_bCANFD && sg_abExp[nIndex])
         {
             tx.frame.flags = CANFD_BRS;
         }
-        memcpy(tx.frame.data, sCanTxMsg.m_ucData, tx.frame.len);
+        BYTE ucCopy = sCanTxMsg.m_ucDataLen > 64 ? 64 : sCanTxMsg.m_ucDataLen;
+        if (ucCopy > tx.frame.len)
+        {
+            ucCopy = tx.frame.len;
+        }
+        memcpy(tx.frame.data, sCanTxMsg.m_ucData, ucCopy);
         unSent = sg_TransmitFD(sg_ahChannel[nIndex], &tx, 1);
     }
     else if (sg_Transmit != nullptr)
@@ -1992,6 +2011,7 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxM
         tx.transmit_type = 0;
         tx.frame.can_id = MakeCanId(sCanTxMsg.m_unMsgID, sCanTxMsg.m_ucEXTENDED, sCanTxMsg.m_ucRTR);
         tx.frame.can_dlc = sCanTxMsg.m_ucDataLen > 8 ? 8 : sCanTxMsg.m_ucDataLen;
+        ucLenOut = tx.frame.can_dlc;
         memcpy(tx.frame.data, sCanTxMsg.m_ucData, tx.frame.can_dlc);
         unSent = sg_Transmit(sg_ahChannel[nIndex], &tx, 1);
     }
@@ -2005,7 +2025,12 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanTxM
     can_data.m_ucDataType = TX_FLAG;
     can_data.m_uDataInfo.m_sCANMsg = sCanTxMsg;
     can_data.m_uDataInfo.m_sCANMsg.m_ucChannel = (unsigned char)(nIndex + 1);
-    QueryPerformanceCounter(&can_data.m_lTickCount);
+    can_data.m_uDataInfo.m_sCANMsg.m_ucDataLen = ucLenOut;
+    LARGE_INTEGER lnNow;
+    QueryPerformanceCounter(&lnNow);
+    LONGLONG llFreq = sg_lnFrequency.QuadPart != 0 ? sg_lnFrequency.QuadPart : 1;
+    can_data.m_lTickCount.QuadPart =
+        ((lnNow.QuadPart - sg_QueryTickCount.QuadPart) * 10000LL) / llFreq;
     RememberTx(nIndex, can_data.m_uDataInfo.m_sCANMsg);
     EnterCriticalSection(&sg_DIL_CriticalSection);
     vWriteIntoClientsBuffer(can_data);

@@ -869,6 +869,18 @@ HRESULT CDIL_CAN_CAEA_VC02::CAN_SendMsg(DWORD dwClientID, const STCAN_MSG& sCanT
     }
     int dlc = sCanTxMsg.m_ucDataLen;
     int fd = (sCanTxMsg.m_bCANFD && sg_channels[index].fd && sg_channels[index].wire <= 4) ? 1 : 0;
+    if (!fd && dlc > 8)
+    {
+        dlc = 8;
+    }
+    if (dlc < 0)
+    {
+        dlc = 0;
+    }
+    if (fd && dlc > 64)
+    {
+        dlc = 64;
+    }
     if (!pTxCan(sg_channels[index].session, sg_channels[index].wire, sCanTxMsg.m_unMsgID,
                 sCanTxMsg.m_ucEXTENDED ? 1 : 0, fd, fd, sCanTxMsg.m_ucData, dlc))
     {

@@ -2258,6 +2258,35 @@ private:
         return -1;
     }
 
+    static int FdCeilLen(int nBytes, int nMax)
+    {
+        static const int s_anLen[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64};
+        if (nMax < 8)
+        {
+            nMax = 8;
+        }
+        if (nMax > 64)
+        {
+            nMax = 64;
+        }
+        if (nBytes < 0)
+        {
+            nBytes = 0;
+        }
+        if (nBytes > nMax)
+        {
+            nBytes = nMax;
+        }
+        for (int i = 0; i < (int)(sizeof(s_anLen) / sizeof(s_anLen[0])); i++)
+        {
+            if (s_anLen[i] >= nBytes && s_anLen[i] <= nMax)
+            {
+                return s_anLen[i];
+            }
+        }
+        return nMax;
+    }
+
     void FillSf(STCAN_MSG& msg, const BYTE* pdu, int len, unsigned char ch)
     {
         memset(&msg, 0, sizeof(msg));
@@ -2265,30 +2294,48 @@ private:
         msg.m_ucEXTENDED = m_ext ? 1 : 0;
         msg.m_ucChannel = ch;
         msg.m_bCANFD = g_udsCanFd ? true : false;
-        int dlc = g_udsCanFd ? g_udsFdDlc : 8;
-        if (dlc < 8)
+        int nMax = g_udsCanFd ? g_udsFdDlc : 8;
+        if (nMax < 8)
         {
-            dlc = 8;
+            nMax = 8;
         }
-        if (dlc > 64)
+        if (nMax > 64)
         {
-            dlc = 64;
+            nMax = 64;
         }
-        msg.m_ucDataLen = (unsigned char)dlc;
-        if (dlc > 8)
+        /* Prefer classic SF (<=8). Escape SF only when data needs CAN_DL > 8. */
+        if (!g_udsCanFd || len <= 7)
         {
-            msg.m_ucData[0] = 0x00;
-            msg.m_ucData[1] = (BYTE)len;
+            int nNeed = 1 + len;
+            int dlc = g_udsCanFd ? FdCeilLen(nNeed, 8) : 8;
+            if (dlc < nNeed)
+            {
+                dlc = nNeed <= 8 ? nNeed : 8;
+            }
+            msg.m_ucDataLen = (unsigned char)dlc;
+            msg.m_ucData[0] = (BYTE)len;
             if (len > 0)
             {
-                memcpy(&msg.m_ucData[2], pdu, len);
+                memcpy(&msg.m_ucData[1], pdu, len);
             }
             return;
         }
-        msg.m_ucData[0] = (BYTE)len;
+        int nNeed = 2 + len;
+        int dlc = FdCeilLen(nNeed, nMax);
+        if (dlc <= 8)
+        {
+            dlc = 12;
+        }
+        if (dlc > nMax)
+        {
+            dlc = nMax;
+        }
+        msg.m_ucDataLen = (unsigned char)dlc;
+        msg.m_ucData[0] = 0x00;
+        msg.m_ucData[1] = (BYTE)len;
         if (len > 0)
         {
-            memcpy(&msg.m_ucData[1], pdu, len);
+            memcpy(&msg.m_ucData[2], pdu, len);
         }
     }
 

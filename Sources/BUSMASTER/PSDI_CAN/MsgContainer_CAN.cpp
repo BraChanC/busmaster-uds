@@ -362,14 +362,14 @@ void CMsgContainerCAN::vProcessNewData(STCANDATA& sCanData)
 
         STCANDATA* pStcan = &m_sCANReadDataSpl;
         *pStcan = sCanData;
+        /* Message Window filter must not block UDS EvaluateMessage — otherwise
+           Diagnostic Window gets "No Response" whenever the response ID is filtered. */
+        if (IS_RX_MESSAGE(m_sCANReadDataSpl.m_ucDataType))
+        {
+            EvaluateMessage(m_sCANReadDataSpl.m_uDataInfo.m_sCANMsg);
+        }
         if (!bTobeBlocked(sCanData))
         {
-            unsigned char FDataType = m_sCANReadDataSpl.m_ucDataType;
-            if(IS_RX_MESSAGE(FDataType))
-            {
-                HRESULT h_Evaluate = EvaluateMessage(m_sCANReadDataSpl.m_uDataInfo.m_sCANMsg);
-            }
-
             m_ouAppendCanBuf.WriteIntoBuffer(&m_sCANReadDataSpl);
             if (nullptr != m_pRxMsgCallBack)
             {
