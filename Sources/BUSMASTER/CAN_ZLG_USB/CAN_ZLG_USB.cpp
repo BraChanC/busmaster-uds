@@ -410,6 +410,35 @@ static unsigned int NominalFromController(PSCONTROLLER_DETAILS pDetails)
     return unBaud ? unBaud : 500000;
 }
 
+/* ZLG custom baud from Advanced dialog: "Arb,Data,(clk,abitHex,dbitHex)". */
+static BOOL IsValidZlgCustomBaud(const char* pc)
+{
+    if (pc == nullptr || pc[0] == 0)
+    {
+        return FALSE;
+    }
+    const char* pcOpen = strchr(pc, '(');
+    const char* pcClose = strrchr(pc, ')');
+    if (pcOpen == nullptr || pcClose == nullptr || pcClose <= pcOpen)
+    {
+        return FALSE;
+    }
+    // Need two commas before '(' (arb,data,) and commas inside the timing tuple.
+    int nComma = 0;
+    for (const char* p = pc; p < pcOpen; p++)
+    {
+        if (*p == ',')
+        {
+            nComma++;
+        }
+    }
+    if (nComma < 2)
+    {
+        return FALSE;
+    }
+    return (strchr(pcOpen, ',') != nullptr) ? TRUE : FALSE;
+}
+
 static void ApplyControllerConfig(PSCONTROLLER_DETAILS pDetails, int nCount)
 {
     if (pDetails == nullptr)
@@ -444,7 +473,9 @@ static void ApplyControllerConfig(PSCONTROLLER_DETAILS pDetails, int nCount)
             sg_aunDataSp[i] = (sg_aunDataBitRate[i] == 5000000) ? 75 : 80;
         }
         memset(sg_acCustomBaud[i], 0, sizeof(sg_acCustomBaud[i]));
-        if (!pDetails[i].m_omStrCNF2.empty())
+        // CNF2 is reused across DIL drivers; classic BTR scraps like "B8" must not
+        // be treated as ZLG baud_rate_custom (format: "500Kbps(80%),2.0Mbps(80%),(80,........,........)").
+        if (IsValidZlgCustomBaud(pDetails[i].m_omStrCNF2.c_str()))
         {
             strncpy_s(sg_acCustomBaud[i], pDetails[i].m_omStrCNF2.c_str(), _TRUNCATE);
         }
@@ -1835,17 +1866,26 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_StartHardware(void)
         }
         sg_ahDevice[i] = hDev;
 
+        // Match ZLG usbcanfd-*.xml + official CANForm init order (settings only):
+        // protocol -> canfd_standard -> canfd_exp -> abit/dbit
+        // -> [set_device_recv_merge] -> InitCAN -> resistance -> filter_clear
+        // -> set_device_tx_echo -> StartCAN
+        const BOOL bUsbFd = IsUsbCanFdType(sg_aunType[i]);
         char acNom[16] = {0};
         char acData[16] = {0};
         sprintf_s(acNom, "%u", sg_aunNomBitRate[i] ? sg_aunNomBitRate[i] : 500000);
         sprintf_s(acData, "%u", sg_aunDataBitRate[i] ? sg_aunDataBitRate[i] : 2000000);
 
-        if (IsUsbCanFdType(sg_aunType[i]))
+        if (bUsbFd)
         {
-            SetAsciiValue(hDev, sg_aunCh[i], "protocol", sg_abCanFd[i] ? "1" : "0");
-            SetAsciiValue(hDev, sg_aunCh[i], "canfd_standard", sg_abIso[i] ? "0" : "1");
-            SetAsciiValue(hDev, sg_aunCh[i], "canfd_exp", sg_abExp[i] ? "1" : "0");
-            if (sg_acCustomBaud[i][0] != 0)
+            // Overwrite ZCANPRO-persisted protocol (0=CAN, 1=CANFD).
+            SetAsciiValue(hDev, sg_aunCh[i], "protocol", "1");
+            if (sg_aunType[i] != ZCAN_USBCANFD_800U)
+            {
+                SetAsciiValue(hDev, sg_aunCh[i], "canfd_standard", sg_abIso[i] ? "0" : "1");
+            }
+            SetAsciiValue(hDev, sg_aunCh[i], "canfd_exp", "1");
+            if (IsValidZlgCustomBaud(sg_acCustomBaud[i]))
             {
                 SetAsciiValue(hDev, sg_aunCh[i], "canfd_abit_baud_rate", "0");
                 SetAsciiValue(hDev, sg_aunCh[i], "baud_rate_custom", sg_acCustomBaud[i]);
@@ -1853,10 +1893,13 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_StartHardware(void)
             else
             {
                 SetAsciiValue(hDev, sg_aunCh[i], "canfd_abit_baud_rate", acNom);
-                if (sg_abCanFd[i] && sg_abExp[i])
-                {
-                    SetAsciiValue(hDev, sg_aunCh[i], "canfd_dbit_baud_rate", acData);
-                }
+                SetAsciiValue(hDev, sg_aunCh[i], "canfd_dbit_baud_rate", acData);
+            }
+            if (sg_aunType[i] == ZCAN_USBCANFD_200U ||
+                sg_aunType[i] == ZCAN_USBCANFD_400U ||
+                sg_aunType[i] == ZCAN_USBCANFD_800U)
+            {
+                SetAsciiValue(hDev, sg_aunCh[i], "set_device_recv_merge", "0");
             }
         }
         else
@@ -1866,7 +1909,7 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_StartHardware(void)
 
         ZCAN_CHANNEL_INIT_CONFIG cfg;
         memset(&cfg, 0, sizeof(cfg));
-        if (IsUsbCanFdType(sg_aunType[i]) || sg_abCanFd[i])
+        if (bUsbFd || sg_abCanFd[i])
         {
             cfg.can_type = TYPE_CANFD;
             cfg.canfd.acc_code = 0;
@@ -1887,8 +1930,15 @@ HRESULT CDIL_CAN_ZLG_USB::CAN_StartHardware(void)
             CAN_StopHardware();
             return S_FALSE;
         }
+
         SetAsciiValue(hDev, sg_aunCh[i], "initenal_resistance", sg_abTerm[i] ? "1" : "0");
+        if (bUsbFd)
+        {
+            // Official setFilter accept-all: filter_clear then mode index 2 (no more keys).
+            SetAsciiValue(hDev, sg_aunCh[i], "filter_clear", "0");
+        }
         SetAsciiValue(hDev, sg_aunCh[i], "set_device_tx_echo", "0");
+
         if (sg_StartCAN(sg_ahChannel[i]) != STATUS_OK)
         {
             sg_acErrStr = "ZCAN_StartCAN failed.";
